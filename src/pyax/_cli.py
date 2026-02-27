@@ -138,6 +138,7 @@ def _tree_dump(
     list_attributes,
     list_actions,
     depth,
+    role_markup="bold red",
     indent=0,
 ):
     obj = _element_to_dict(
@@ -146,28 +147,41 @@ def _tree_dump(
     show_subtree = depth != 0
     if "AXChildren" in obj and show_subtree:
         obj.pop("AXChildren")
-    to_print = _obj_to_pretty_string(element, obj)
+    to_print = _obj_to_pretty_string(element, obj, role_markup)
     _CONSOLE.print(f"{indent * ' '}{to_print}")
     if not show_subtree:
         return
 
     for child in element:
         _tree_dump(
-            child, attributes, all_attributes, list_attributes, list_actions, depth - 1, indent + 1
+            child, attributes, all_attributes, list_attributes, list_actions, depth - 1, role_markup, indent + 1
         )
 
 
 def _create_notification_dumper(
-    attributes, print_info, all_attributes, list_attributes, list_actions
+    attributes, print_info, all_attributes, list_attributes, list_actions, depth,
 ):
     def dump_notification(_, element, notificationName, info):
-        obj = _element_to_dict(
-            element, attributes, all_attributes, list_attributes, list_actions
-        )
-        if "AXChildren" in obj:
-            obj.pop("AXChildren")
-        to_print = _obj_to_pretty_string(element, obj, "red")
-        _CONSOLE.print(f"[bold]{notificationName.ljust(25)}[/bold] {to_print}")
+        if depth != 0:
+            _CONSOLE.print(f"[bold]{notificationName}[/bold]")
+            _tree_dump(
+                element,
+                attributes,
+                all_attributes,
+                list_attributes,
+                list_actions,
+                depth,
+                role_markup="red",
+                indent=2,
+            )
+        else:
+            obj = _element_to_dict(
+                element, attributes, all_attributes, list_attributes, list_actions
+            )
+            if "AXChildren" in obj:
+                obj.pop("AXChildren")
+            to_print = _obj_to_pretty_string(element, obj, "red")
+            _CONSOLE.print(f"[bold]{notificationName.ljust(25)}[/bold] {to_print}")
         if print_info:
             if info:
                 _CONSOLE.print(JSON.from_data(info, default=_default_json_encoder))
@@ -202,13 +216,14 @@ def observe(
     all_attributes,
     list_attributes,
     list_actions,
+    depth,
     print_info,
 ):
     app = get_application_by_name(app_name)
     observer = create_observer(
         app.pid,
         _create_notification_dumper(
-            attributes, print_info, all_attributes, list_attributes, list_actions
+            attributes, print_info, all_attributes, list_attributes, list_actions, depth
         ),
     )
     observer.add_notifications(*(events or EVENTS))

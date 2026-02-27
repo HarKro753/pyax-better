@@ -90,6 +90,9 @@ def observe(
         bool,
         typer.Option(help="List available actions and their description on each node"),
     ] = False,
+    depth: Annotated[
+        int, typer.Option(help="Depth of subtree to show")
+    ] = 0,
     print_info: Annotated[
         bool, typer.Option(help="Print bundled notification info")
     ] = False,
@@ -101,6 +104,7 @@ def observe(
         all_attributes,
         list_attributes,
         list_actions,
+        depth,
         print_info,
     )
 
