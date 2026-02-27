@@ -100,17 +100,19 @@ def _obj_to_pretty_string(element, obj, role_markup="bold red"):
 
 
 def _json_dump_inner(
-    element, attributes, all_attributes, list_attributes, list_actions
+    element, attributes, all_attributes, list_attributes, list_actions, depth
 ):
     obj = _element_to_dict(
         element, attributes, all_attributes, list_attributes, list_actions
     )
-    obj["AXChildren"] = [
-        _json_dump_inner(
-            child, attributes, all_attributes, list_attributes, list_actions
-        )
-        for child in element
-    ]
+
+    if depth != 0:
+        obj["AXChildren"] = [
+            _json_dump_inner(
+                child, attributes, all_attributes, list_attributes, list_actions, depth - 1
+            )
+            for child in element
+        ]
     return obj
 
 
@@ -120,15 +122,11 @@ def _json_dump(
     all_attributes,
     list_attributes,
     list_actions,
-    show_subtree=True,
+    depth,
 ):
     attrs = element.attribute_names if all_attributes else attributes[:]
-    data = (
-        _element_to_dict(element, attrs, all_attributes, list_attributes, list_actions)
-        if not show_subtree
-        else _json_dump_inner(
-            element, attrs, all_attributes, list_attributes, list_actions
-        )
+    data = _json_dump_inner(
+            element, attrs, all_attributes, list_attributes, list_actions, depth
     )
     _CONSOLE.print(JSON.from_data(data, default=_default_json_encoder))
 
@@ -139,12 +137,13 @@ def _tree_dump(
     all_attributes,
     list_attributes,
     list_actions,
+    depth,
     indent=0,
-    show_subtree=True,
 ):
     obj = _element_to_dict(
         element, attributes, all_attributes, list_attributes, list_actions
     )
+    show_subtree = depth != 0
     if "AXChildren" in obj and show_subtree:
         obj.pop("AXChildren")
     to_print = _obj_to_pretty_string(element, obj)
@@ -154,7 +153,7 @@ def _tree_dump(
 
     for child in element:
         _tree_dump(
-            child, attributes, all_attributes, list_attributes, list_actions, indent + 1
+            child, attributes, all_attributes, list_attributes, list_actions, depth - 1, indent + 1
         )
 
 
@@ -186,13 +185,14 @@ def tree(
     list_attributes,
     list_actions,
     json,
+    depth,
 ):
     element = _get_target_uielement(_get_target_application(app_name), web, dom_id)
 
     if json:
-        _json_dump(element, attributes, all_attributes, list_attributes, list_actions)
+        _json_dump(element, attributes, all_attributes, list_attributes, list_actions, depth)
     else:
-        _tree_dump(element, attributes, all_attributes, list_attributes, list_actions)
+        _tree_dump(element, attributes, all_attributes, list_attributes, list_actions, depth)
 
 
 def observe(
@@ -222,7 +222,7 @@ def inspect(
     all_attributes,
     list_attributes,
     list_actions,
-    show_subtree,
+    depth,
     json,
 ):
     app = _get_target_application(app_name)
@@ -239,7 +239,7 @@ def inspect(
                 all_attributes,
                 list_attributes,
                 list_actions,
-                show_subtree=show_subtree,
+                depth=depth,
             )
         else:
             _tree_dump(
@@ -248,7 +248,7 @@ def inspect(
                 all_attributes,
                 list_attributes,
                 list_actions,
-                show_subtree=show_subtree,
+                depth=depth,
             )
 
     if dom_id:

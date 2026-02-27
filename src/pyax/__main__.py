@@ -53,6 +53,9 @@ def tree(
         bool,
         typer.Option(help="List available actions and their description on each node"),
     ] = False,
+    depth: Annotated[
+        int, typer.Option(help="Depth of subtree to show")
+    ] = -1,
     json: Annotated[bool, typer.Option(help="Output in JSON format")] = False,
 ):
     cli_tree(
@@ -64,6 +67,7 @@ def tree(
         list_attributes,
         list_actions,
         json,
+        depth,
     )
 
 
@@ -121,8 +125,11 @@ def inspect(
         typer.Option(help="List available actions and their description on each node"),
     ] = False,
     show_subtree: Annotated[
-        bool, typer.Option(help="Print the subtree of the inspected element")
+        bool, typer.Option(help="Print the subtree of the inspected element (deprecated, use --depth)")
     ] = False,
+    depth: Annotated[
+        int, typer.Option(help="Depth of subtree to show")
+    ] = 0,
     json: Annotated[bool, typer.Option(help="Output in JSON format")] = False,
 ):
     cli_inspect(
@@ -132,7 +139,7 @@ def inspect(
         all_attributes,
         list_attributes,
         list_actions,
-        show_subtree,
+        -1 if show_subtree and depth == 0 else depth,
         json,
     )
 
