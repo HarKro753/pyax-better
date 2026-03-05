@@ -10,6 +10,10 @@ let package = Package(
         .executableTarget(
             name: "PyAxAssistant",
             path: "Sources/PyAxAssistant"
-        )
+        ),
+        .testTarget(
+            name: "PyAxAssistantTests",
+            dependencies: ["PyAxAssistant"]
+        ),
     ]
 )

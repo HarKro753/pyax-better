@@ -1,10 +1,9 @@
 import SwiftUI
 
-/// Main content view composing the status bar, search, and raw JSON event stream.
 struct ContentView: View {
-    @State private var appState = AppState()
-    @State private var webSocket = WebSocketService()
-    @State private var pythonBridge = PythonBridgeService()
+    @Environment(AppState.self) private var appState
+    @Environment(WebSocketService.self) private var webSocket
+    @Environment(PythonBridgeService.self) private var pythonBridge
 
     var body: some View {
         VStack(spacing: 0) {
@@ -13,24 +12,22 @@ struct ContentView: View {
                 connectionStatus: appState.connectionStatus,
                 eventCount: appState.messages.count,
                 isPaused: appState.isPaused,
-                onTogglePause: togglePause,
-                onClear: clearEvents,
+                onTogglePause: { appState.togglePause() },
+                onClear: { appState.clearMessages() },
                 onToggleBridge: toggleBridge
             )
 
             Divider()
                 .opacity(0.3)
 
-            // Search/filter bar
-            SearchBar(filterText: Binding(
-                get: { appState.filterText },
-                set: { appState.filterText = $0 }
-            ))
+            SearchBar(
+                filterText: appState.filterText,
+                onFilterChanged: { appState.updateFilterText($0) }
+            )
 
             Divider()
                 .opacity(0.3)
 
-            // Raw JSON stream or empty state
             if appState.filteredMessages.isEmpty {
                 EmptyStreamView(connectionStatus: appState.connectionStatus)
             } else {
@@ -42,7 +39,7 @@ struct ContentView: View {
         }
         .frame(minWidth: 340, minHeight: 300)
         .task {
-            setupWebSocketCallbacks()
+            webSocket.delegate = appState
             startBridge()
         }
         .onDisappear {
@@ -52,14 +49,6 @@ struct ContentView: View {
     }
 
     // MARK: - Actions
-
-    private func togglePause() {
-        appState.isPaused.toggle()
-    }
-
-    private func clearEvents() {
-        appState.clearEvents()
-    }
 
     private func toggleBridge() {
         if appState.connectionStatus == .connected {
@@ -77,26 +66,13 @@ struct ContentView: View {
             webSocket.connect()
         }
     }
-
-    private func setupWebSocketCallbacks() {
-        // Every raw JSON message goes straight to the UI
-        webSocket.onRawMessage = { rawJSON in
-            appState.appendMessage(rawJSON)
-        }
-
-        webSocket.onAppChanged = { name, pid in
-            appState.updateObservedApp(name: name, pid: pid)
-        }
-
-        webSocket.onConnectionStatusChanged = { status in
-            appState.connectionStatus = status
-        }
-    }
 }
 
-/// Search/filter bar for filtering messages by text.
-private struct SearchBar: View {
-    @Binding var filterText: String
+struct SearchBar: View {
+    let filterText: String
+    let onFilterChanged: (String) -> Void
+
+    @State private var _localText = ""
 
     var body: some View {
         HStack(spacing: 8) {
@@ -104,13 +80,13 @@ private struct SearchBar: View {
                 .foregroundStyle(.secondary)
                 .font(.system(size: 11))
 
-            TextField("Filter...", text: $filterText)
+            TextField("Filter...", text: $_localText)
                 .textFieldStyle(.plain)
                 .font(.system(.caption, design: .monospaced))
 
-            if !filterText.isEmpty {
+            if !_localText.isEmpty {
                 Button {
-                    filterText = ""
+                    _localText = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(.tertiary)
@@ -121,5 +97,9 @@ private struct SearchBar: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 5)
+        .onAppear { _localText = filterText }
+        .onChange(of: _localText) { _, newValue in
+            onFilterChanged(newValue)
+        }
     }
 }

@@ -1,11 +1,10 @@
 import SwiftUI
 
-/// Scrolling raw JSON message stream.
 struct EventStreamView: View {
     let messages: [RawMessage]
     let autoScroll: Bool
 
-    private let bottomAnchorID = "stream-bottom"
+    private let _bottomAnchorID = "stream-bottom"
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -21,27 +20,26 @@ struct EventStreamView: View {
 
                     Color.clear
                         .frame(height: 1)
-                        .id(bottomAnchorID)
+                        .id(_bottomAnchorID)
                 }
             }
             .scrollIndicators(.hidden)
             .onChange(of: messages.count) { _, _ in
                 if autoScroll {
                     withAnimation(.easeOut(duration: 0.15)) {
-                        proxy.scrollTo(bottomAnchorID, anchor: .bottom)
+                        proxy.scrollTo(_bottomAnchorID, anchor: .bottom)
                     }
                 }
             }
             .onAppear {
                 if autoScroll {
-                    proxy.scrollTo(bottomAnchorID, anchor: .bottom)
+                    proxy.scrollTo(_bottomAnchorID, anchor: .bottom)
                 }
             }
         }
     }
 }
 
-/// Single raw JSON message row — just the JSON, nothing else.
 struct RawMessageView: View {
     let message: RawMessage
 
@@ -56,9 +54,8 @@ struct RawMessageView: View {
     }
 }
 
-/// Placeholder view when no messages are being received.
 struct EmptyStreamView: View {
-    let connectionStatus: AppState.ConnectionStatus
+    let connectionStatus: ConnectionStatus
 
     var body: some View {
         VStack(spacing: 12) {

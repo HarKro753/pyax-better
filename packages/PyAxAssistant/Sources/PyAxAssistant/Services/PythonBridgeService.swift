@@ -1,71 +1,52 @@
 import Foundation
 
-/// Service responsible for spawning and managing the Python bridge process.
-/// Launches `python3 -m pyax.bridge` as a child process that communicates via WebSocket.
 @Observable
 @MainActor
 final class PythonBridgeService {
 
-    // MARK: - State
+    // MARK: - Private State
 
-    enum BridgeStatus: Equatable {
-        case stopped
-        case starting
-        case running
-        case error(String)
-    }
+    private var _status: BridgeStatus = .stopped
+    private var _process: Process?
+    private var _outputPipe: Pipe?
+    private var _errorPipe: Pipe?
+    private let _pythonPath: String
+    private let _portManager: PortManager
+    private let _configuration: BridgeConfiguration
 
-    private(set) var status: BridgeStatus = .stopped
-    private var process: Process?
-    private var outputPipe: Pipe?
-    private var errorPipe: Pipe?
+    // MARK: - Read Access
 
-    /// Path to the Python 3 executable.
-    private let pythonPath: String
+    var status: BridgeStatus { _status }
 
     // MARK: - Init
 
-    init() {
-        self.pythonPath = Self.findPython3()
+    init(
+        portManager: PortManager = PortManager(),
+        configuration: BridgeConfiguration = .default
+    ) {
+        self._portManager = portManager
+        self._configuration = configuration
+        self._pythonPath = Self.findPython3()
     }
 
     // MARK: - Lifecycle
 
-    /// The port used by the Python bridge WebSocket server.
-    private static let bridgePort: UInt16 = 8765
-
     func start() {
-        guard status == .stopped || {
-            if case .error = status { return true }
-            return false
-        }() else { return }
+        guard _status.canStart else { return }
 
-        status = .starting
-
-        // Kill any orphaned process still holding the bridge port
-        Self.killProcessOnPort(Self.bridgePort)
+        _status = .starting
+        _portManager.killProcessOnPort(_configuration.port)
 
         let process = Process()
         let outputPipe = Pipe()
         let errorPipe = Pipe()
 
-        process.executableURL = URL(fileURLWithPath: pythonPath)
+        process.executableURL = URL(fileURLWithPath: _pythonPath)
         process.arguments = ["-m", "pyax.bridge"]
         process.standardOutput = outputPipe
         process.standardError = errorPipe
+        process.environment = buildEnvironment()
 
-        // Set environment so Python can find the pyax package
-        var env = ProcessInfo.processInfo.environment
-        let userSitePackages = "\(NSHomeDirectory())/Library/Python/3.9/lib/python/site-packages"
-        let localPyaxSrc = Self.findPyaxSrcPath()
-        var pythonPaths = [localPyaxSrc, userSitePackages]
-        if let existing = env["PYTHONPATH"] {
-            pythonPaths.append(existing)
-        }
-        env["PYTHONPATH"] = pythonPaths.joined(separator: ":")
-        process.environment = env
-
-        // Drain stdout/stderr so the pipe doesn't block
         outputPipe.fileHandleForReading.readabilityHandler = { handle in
             _ = handle.availableData
         }
@@ -73,62 +54,59 @@ final class PythonBridgeService {
             _ = handle.availableData
         }
 
-        process.terminationHandler = { [weak self] process in
+        process.terminationHandler = { [weak self] terminatedProcess in
             Task { @MainActor in
                 guard let self else { return }
-                if process.terminationStatus != 0 {
-                    self.status = .error("Process exited with code \(process.terminationStatus)")
+                if terminatedProcess.terminationStatus != 0 {
+                    self._status = .error("Process exited with code \(terminatedProcess.terminationStatus)")
                 } else {
-                    self.status = .stopped
+                    self._status = .stopped
                 }
             }
         }
 
         do {
             try process.run()
-            self.process = process
-            self.outputPipe = outputPipe
-            self.errorPipe = errorPipe
-            status = .running
+            self._process = process
+            self._outputPipe = outputPipe
+            self._errorPipe = errorPipe
+            _status = .running
         } catch {
-            status = .error("Failed to start: \(error.localizedDescription)")
+            _status = .error("Failed to start: \(error.localizedDescription)")
         }
     }
 
     func stop() {
-        guard let process, process.isRunning else {
-            status = .stopped
+        guard let process = _process, process.isRunning else {
+            _status = .stopped
             return
         }
 
         process.terminate()
+        cleanupPipes()
 
-        // Wait for graceful exit on a background queue, then force-kill if needed
         let capturedProcess = process
+        let shutdownTimeout = _configuration.gracefulShutdownTimeout
+
         DispatchQueue.global().async { [weak self] in
-            // Give the process up to 2 seconds to terminate gracefully
-            for _ in 0..<20 {
+            let intervals = Int(shutdownTimeout.components.seconds * 10)
+            for _ in 0..<intervals {
                 if !capturedProcess.isRunning { break }
-                usleep(100_000) // 100ms
+                usleep(100_000)
             }
             if capturedProcess.isRunning {
                 capturedProcess.interrupt()
-                usleep(500_000) // 500ms
+                usleep(500_000)
                 if capturedProcess.isRunning {
-                    // Last resort: kill via pid
                     kill(capturedProcess.processIdentifier, SIGKILL)
                 }
             }
             Task { @MainActor in
-                self?.status = .stopped
+                self?._status = .stopped
             }
         }
 
-        outputPipe?.fileHandleForReading.readabilityHandler = nil
-        errorPipe?.fileHandleForReading.readabilityHandler = nil
-        self.process = nil
-        self.outputPipe = nil
-        self.errorPipe = nil
+        _process = nil
     }
 
     func restart() {
@@ -139,80 +117,17 @@ final class PythonBridgeService {
         }
     }
 
-    // MARK: - Port Management
+    // MARK: - Private — Pipe Cleanup
 
-    /// Kill any process currently listening on the given TCP port.
-    /// Uses `lsof` to find the PID, then sends SIGTERM followed by SIGKILL if needed.
-    private static func killProcessOnPort(_ port: UInt16) {
-        // Use lsof to find PIDs listening on the port
-        let lsof = Process()
-        let pipe = Pipe()
-        lsof.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        lsof.arguments = ["-ti", "tcp:\(port)"]
-        lsof.standardOutput = pipe
-        lsof.standardError = FileHandle.nullDevice
-
-        do {
-            try lsof.run()
-            lsof.waitUntilExit()
-        } catch {
-            return
-        }
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !output.isEmpty else {
-            return
-        }
-
-        // Parse PIDs (one per line) and kill each
-        let myPID = ProcessInfo.processInfo.processIdentifier
-        let pids = output.split(separator: "\n").compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
-
-        for pid in pids where pid != myPID {
-            print("[PythonBridge] Killing orphaned process on port \(port): PID \(pid)")
-            kill(pid, SIGTERM)
-        }
-
-        // Brief wait, then force-kill any survivors
-        if !pids.isEmpty {
-            usleep(500_000) // 500ms
-            for pid in pids where pid != myPID {
-                // Check if still alive (kill with signal 0 tests existence)
-                if kill(pid, 0) == 0 {
-                    print("[PythonBridge] Force-killing PID \(pid)")
-                    kill(pid, SIGKILL)
-                }
-            }
-        }
+    private func cleanupPipes() {
+        _outputPipe?.fileHandleForReading.readabilityHandler = nil
+        _errorPipe?.fileHandleForReading.readabilityHandler = nil
+        _outputPipe = nil
+        _errorPipe = nil
     }
 
-    // MARK: - Path Resolution
+    // MARK: - Private — Python Path Resolution
 
-    /// Find the local pyax source directory (packages/pyax/src) for development.
-    private static func findPyaxSrcPath() -> String {
-        // Walk up from executable to find the monorepo root
-        let executablePath = Bundle.main.executablePath ?? ""
-        var dir = (executablePath as NSString).deletingLastPathComponent
-
-        for _ in 0..<15 {
-            let candidate = (dir as NSString).appendingPathComponent("packages/pyax/src")
-            if FileManager.default.fileExists(atPath: candidate) {
-                return candidate
-            }
-            dir = (dir as NSString).deletingLastPathComponent
-        }
-
-        // Fallback: common development path
-        let devPath = "\(NSHomeDirectory())/Desktop/pyax-better/packages/pyax/src"
-        if FileManager.default.fileExists(atPath: devPath) {
-            return devPath
-        }
-
-        return ""
-    }
-
-    /// Find Python 3 executable on the system.
     private static func findPython3() -> String {
         let candidates = [
             "/usr/bin/python3",
@@ -228,5 +143,37 @@ final class PythonBridgeService {
         }
 
         return "/usr/bin/python3"
+    }
+
+    private static func findPyaxSourcePath() -> String {
+        let executablePath = Bundle.main.executablePath ?? ""
+        var directory = (executablePath as NSString).deletingLastPathComponent
+
+        for _ in 0..<15 {
+            let candidate = (directory as NSString).appendingPathComponent("packages/pyax/src")
+            if FileManager.default.fileExists(atPath: candidate) {
+                return candidate
+            }
+            directory = (directory as NSString).deletingLastPathComponent
+        }
+
+        let developmentPath = "\(NSHomeDirectory())/Desktop/pyax-better/packages/pyax/src"
+        if FileManager.default.fileExists(atPath: developmentPath) {
+            return developmentPath
+        }
+
+        return ""
+    }
+
+    private func buildEnvironment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let pyaxSourcePath = Self.findPyaxSourcePath()
+        let userSitePackages = "\(NSHomeDirectory())/Library/Python/3.9/lib/python/site-packages"
+        var pythonPaths = [pyaxSourcePath, userSitePackages]
+        if let existing = env["PYTHONPATH"] {
+            pythonPaths.append(existing)
+        }
+        env["PYTHONPATH"] = pythonPaths.joined(separator: ":")
+        return env
     }
 }

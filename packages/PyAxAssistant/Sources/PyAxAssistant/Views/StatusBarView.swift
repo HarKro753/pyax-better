@@ -1,9 +1,8 @@
 import SwiftUI
 
-/// Status bar at the top of the overlay showing connection state and observed app.
 struct StatusBarView: View {
     let observedAppName: String?
-    let connectionStatus: AppState.ConnectionStatus
+    let connectionStatus: ConnectionStatus
     let eventCount: Int
     let isPaused: Bool
     let onTogglePause: () -> Void
@@ -12,10 +11,8 @@ struct StatusBarView: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            // Connection indicator
             ConnectionIndicator(status: connectionStatus)
 
-            // App name
             VStack(alignment: .leading, spacing: 1) {
                 Text(observedAppName ?? "No App Focused")
                     .font(.system(.caption, weight: .semibold))
@@ -28,7 +25,6 @@ struct StatusBarView: View {
 
             Spacer()
 
-            // Event counter pill
             Text("\(eventCount)")
                 .font(.system(.caption2, design: .monospaced, weight: .medium))
                 .foregroundStyle(.secondary)
@@ -37,7 +33,6 @@ struct StatusBarView: View {
                 .background(.white.opacity(0.1))
                 .clipShape(.rect(cornerRadius: 4))
 
-            // Controls
             ToolbarControls(
                 isPaused: isPaused,
                 connectionStatus: connectionStatus,
@@ -57,16 +52,19 @@ struct StatusBarView: View {
         case .connecting:
             return "Connecting..."
         case .connected:
-            return isPaused ? "Paused" : "Streaming"
+            if isPaused {
+                return "Paused"
+            } else {
+                return "Streaming"
+            }
         }
     }
 }
 
-/// Animated connection status indicator dot.
 private struct ConnectionIndicator: View {
-    let status: AppState.ConnectionStatus
+    let status: ConnectionStatus
 
-    @State private var isAnimating = false
+    @State private var _isAnimating = false
 
     var body: some View {
         Circle()
@@ -75,20 +73,20 @@ private struct ConnectionIndicator: View {
             .overlay {
                 Circle()
                     .stroke(indicatorColor.opacity(0.4), lineWidth: 1.5)
-                    .scaleEffect(isAnimating ? 2.0 : 1.0)
-                    .opacity(isAnimating ? 0 : 1)
+                    .scaleEffect(_isAnimating ? 2.0 : 1.0)
+                    .opacity(_isAnimating ? 0 : 1)
             }
             .onChange(of: status) { _, newStatus in
-                isAnimating = newStatus == .connected
+                _isAnimating = newStatus == .connected
             }
             .animation(
-                isAnimating
+                _isAnimating
                     ? .easeOut(duration: 1.5).repeatForever(autoreverses: false)
                     : .default,
-                value: isAnimating
+                value: _isAnimating
             )
             .onAppear {
-                isAnimating = status == .connected
+                _isAnimating = status == .connected
             }
     }
 
@@ -104,10 +102,9 @@ private struct ConnectionIndicator: View {
     }
 }
 
-/// Toolbar control buttons — small, glassy style.
 private struct ToolbarControls: View {
     let isPaused: Bool
-    let connectionStatus: AppState.ConnectionStatus
+    let connectionStatus: ConnectionStatus
     let onTogglePause: () -> Void
     let onClear: () -> Void
     let onToggleBridge: () -> Void

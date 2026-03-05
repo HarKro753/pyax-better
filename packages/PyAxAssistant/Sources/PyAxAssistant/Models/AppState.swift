@@ -1,78 +1,76 @@
 import Foundation
 import SwiftUI
 
-/// Main application state using @Observable (modern SwiftUI pattern).
-/// Stores raw JSON messages from the bridge for debug display.
 @Observable
 @MainActor
 final class AppState {
 
-    // MARK: - Connection State
+    // MARK: - Private State
 
-    enum ConnectionStatus: Equatable {
-        case disconnected
-        case connecting
-        case connected
-    }
+    private var _connectionStatus: ConnectionStatus = .disconnected
+    private var _observedAppName: String?
+    private var _observedAppPID: Int?
+    private var _messages: [RawMessage] = []
+    private var _autoScroll = true
+    private var _isPaused = false
+    private var _filterText = ""
+    private let _configuration: BridgeConfiguration
 
-    var connectionStatus: ConnectionStatus = .disconnected
+    // MARK: - Read Access
 
-    // MARK: - Observed App
+    var connectionStatus: ConnectionStatus { _connectionStatus }
+    var observedAppName: String? { _observedAppName }
+    var observedAppPID: Int? { _observedAppPID }
+    var messages: [RawMessage] { _messages }
+    var autoScroll: Bool { _autoScroll }
+    var isPaused: Bool { _isPaused }
+    var filterText: String { _filterText }
 
-    var observedAppName: String?
-    var observedAppPID: Int?
-
-    // MARK: - Raw Message Stream
-
-    /// Raw JSON messages from the bridge, newest last.
-    private(set) var messages: [RawMessage] = []
-
-    /// Maximum number of messages to keep in memory.
-    private let maxMessages = 500
-
-    /// Whether auto-scroll is enabled.
-    var autoScroll = true
-
-    /// Whether the stream is paused.
-    var isPaused = false
-
-    /// Filter text for searching messages.
-    var filterText = ""
-
-    /// Filtered messages based on search text.
     var filteredMessages: [RawMessage] {
-        if filterText.isEmpty {
-            return messages
+        if _filterText.isEmpty {
+            return _messages
         }
-        return messages.filter { $0.json.localizedStandardContains(filterText) }
+        return _messages.filter { $0.json.localizedStandardContains(_filterText) }
     }
 
-    // MARK: - Actions
+    // MARK: - Init
 
-    func appendMessage(_ json: String) {
-        guard !isPaused else { return }
-        messages.append(RawMessage(id: UUID(), json: json))
-        if messages.count > maxMessages {
-            messages.removeFirst(messages.count - maxMessages)
-        }
+    init(configuration: BridgeConfiguration = .default) {
+        self._configuration = configuration
     }
 
-    func clearEvents() {
-        messages.removeAll()
+    // MARK: - Mutation Methods
+
+    func updateConnectionStatus(_ status: ConnectionStatus) {
+        _connectionStatus = status
     }
 
     func updateObservedApp(name: String?, pid: Int?) {
-        observedAppName = name
-        observedAppPID = pid
+        _observedAppName = name
+        _observedAppPID = pid
     }
-}
 
-/// A single raw JSON message for display.
-struct RawMessage: Identifiable, Equatable {
-    let id: UUID
-    let json: String
+    func appendMessage(_ json: String) {
+        guard !_isPaused else { return }
+        _messages.append(RawMessage(id: UUID(), json: json))
+        if _messages.count > _configuration.maxMessages {
+            _messages.removeFirst(_messages.count - _configuration.maxMessages)
+        }
+    }
 
-    static func == (lhs: RawMessage, rhs: RawMessage) -> Bool {
-        lhs.id == rhs.id
+    func clearMessages() {
+        _messages.removeAll()
+    }
+
+    func togglePause() {
+        _isPaused.toggle()
+    }
+
+    func toggleAutoScroll() {
+        _autoScroll.toggle()
+    }
+
+    func updateFilterText(_ text: String) {
+        _filterText = text
     }
 }
