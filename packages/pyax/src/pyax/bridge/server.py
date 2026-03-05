@@ -94,6 +94,7 @@ class ObserverManager:
         self.tracker = FocusedAppTracker()
         self._observer = None
         self._main_runloop = None
+        self._callback_ref = None  # prevent GC of callback
 
     def notification_callback(self, observer, element, notification, info):
         """Called by pyax when an accessibility event fires (on main thread)."""
@@ -140,31 +141,40 @@ class ObserverManager:
         self.stop_observer()
 
         try:
-            observer = pyax.create_observer(
-                pid, self.notification_callback, cfrunloop=self._main_runloop
-            )
+            # Keep a strong ref to the callback to prevent garbage collection
+            self._callback_ref = self.notification_callback
+
+            # Don't pass cfrunloop — we're already on the main thread,
+            # so CFRunLoopGetCurrent() inside create_observer will use
+            # the main run loop automatically.
+            observer = pyax.create_observer(pid, self._callback_ref)
             if observer is None:
                 print(f"[bridge] Failed to create observer for PID {pid}", flush=True)
                 return
 
-            try:
-                observer.add_notifications(*pyax.EVENTS)
-            except Exception:
-                # Fall back to adding one at a time
-                for event_name in pyax.EVENTS:
-                    try:
-                        observer.add_notifications(event_name)
-                    except Exception:
-                        pass
+            # Register for all known accessibility events
+            events_added = 0
+            for event_name in pyax.EVENTS:
+                try:
+                    observer.add_notifications(event_name)
+                    events_added += 1
+                except Exception as e:
+                    print(f"[bridge] Could not add {event_name}: {e}", flush=True)
 
             self._observer = observer
-            print(f"[bridge] Observer started for PID {pid}", flush=True)
+            print(
+                f"[bridge] Observer started for PID {pid} ({events_added} events registered)",
+                flush=True,
+            )
         except Exception as e:
             print(f"[bridge] Error starting observer: {e}", flush=True)
 
     def stop_observer(self):
         """Stop the current observer."""
+        if self._observer is not None:
+            print("[bridge] Stopping previous observer", flush=True)
         self._observer = None
+        self._callback_ref = None
 
     def poll_focus(self, timer, info):
         """CFRunLoop timer callback — checks for focused app changes."""
