@@ -59,20 +59,12 @@ final class PythonBridgeService {
         env["PYTHONPATH"] = pythonPaths.joined(separator: ":")
         process.environment = env
 
-        // Read stdout asynchronously
+        // Drain stdout/stderr so the pipe doesn't block
         outputPipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if !data.isEmpty, let output = String(data: data, encoding: .utf8) {
-                print("[Python stdout] \(output)")
-            }
+            _ = handle.availableData
         }
-
-        // Read stderr asynchronously
         errorPipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if !data.isEmpty, let output = String(data: data, encoding: .utf8) {
-                print("[Python stderr] \(output)")
-            }
+            _ = handle.availableData
         }
 
         process.terminationHandler = { [weak self] process in
@@ -92,10 +84,8 @@ final class PythonBridgeService {
             self.outputPipe = outputPipe
             self.errorPipe = errorPipe
             status = .running
-            print("[PythonBridge] Started bridge server (PID: \(process.processIdentifier))")
         } catch {
             status = .error("Failed to start: \(error.localizedDescription)")
-            print("[PythonBridge] Error starting: \(error)")
         }
     }
 
@@ -121,7 +111,6 @@ final class PythonBridgeService {
         self.process = nil
         self.outputPipe = nil
         self.errorPipe = nil
-        print("[PythonBridge] Stopped bridge server")
     }
 
     func restart() {

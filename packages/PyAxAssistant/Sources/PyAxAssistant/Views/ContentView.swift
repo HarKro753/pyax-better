@@ -1,7 +1,6 @@
 import SwiftUI
 
-/// Main content view composing the status bar, search, and event stream.
-/// Designed for a translucent floating panel — all backgrounds are clear/glassy.
+/// Main content view composing the status bar, search, and raw JSON event stream.
 struct ContentView: View {
     @State private var appState = AppState()
     @State private var webSocket = WebSocketService()
@@ -9,11 +8,10 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Draggable title area with status
             StatusBarView(
                 observedAppName: appState.observedAppName,
                 connectionStatus: appState.connectionStatus,
-                eventCount: appState.events.count,
+                eventCount: appState.messages.count,
                 isPaused: appState.isPaused,
                 onTogglePause: togglePause,
                 onClear: clearEvents,
@@ -32,12 +30,12 @@ struct ContentView: View {
             Divider()
                 .opacity(0.3)
 
-            // Event stream or empty state
-            if appState.filteredEvents.isEmpty {
+            // Raw JSON stream or empty state
+            if appState.filteredMessages.isEmpty {
                 EmptyStreamView(connectionStatus: appState.connectionStatus)
             } else {
                 EventStreamView(
-                    events: appState.filteredEvents,
+                    messages: appState.filteredMessages,
                     autoScroll: appState.autoScroll
                 )
             }
@@ -74,8 +72,6 @@ struct ContentView: View {
 
     private func startBridge() {
         pythonBridge.start()
-
-        // Give the Python process a moment to start the WebSocket server
         Task {
             try? await Task.sleep(for: .seconds(2))
             webSocket.connect()
@@ -83,8 +79,9 @@ struct ContentView: View {
     }
 
     private func setupWebSocketCallbacks() {
-        webSocket.onEvent = { event in
-            appState.appendEvent(event)
+        // Every raw JSON message goes straight to the UI
+        webSocket.onRawMessage = { rawJSON in
+            appState.appendMessage(rawJSON)
         }
 
         webSocket.onAppChanged = { name, pid in
@@ -97,7 +94,7 @@ struct ContentView: View {
     }
 }
 
-/// Search/filter bar for filtering events by text.
+/// Search/filter bar for filtering messages by text.
 private struct SearchBar: View {
     @Binding var filterText: String
 
@@ -107,9 +104,9 @@ private struct SearchBar: View {
                 .foregroundStyle(.secondary)
                 .font(.system(size: 11))
 
-            TextField("Filter events...", text: $filterText)
+            TextField("Filter...", text: $filterText)
                 .textFieldStyle(.plain)
-                .font(.system(.caption))
+                .font(.system(.caption, design: .monospaced))
 
             if !filterText.isEmpty {
                 Button {

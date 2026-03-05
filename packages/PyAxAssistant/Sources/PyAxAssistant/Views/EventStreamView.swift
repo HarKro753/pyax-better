@@ -1,9 +1,8 @@
 import SwiftUI
 
-/// Chat-style scrolling event stream that displays accessibility events.
-/// Uses LazyVStack for performance and ScrollViewReader for auto-scrolling.
+/// Scrolling raw JSON message stream.
 struct EventStreamView: View {
-    let events: [AccessibilityEvent]
+    let messages: [RawMessage]
     let autoScroll: Bool
 
     private let bottomAnchorID = "stream-bottom"
@@ -12,23 +11,21 @@ struct EventStreamView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(events) { event in
-                        EventBubbleView(event: event)
-                            .id(event.id)
+                    ForEach(messages) { message in
+                        RawMessageView(message: message)
+                            .id(message.id)
 
                         Divider()
                             .opacity(0.15)
-                            .padding(.leading, 40)
                     }
 
-                    // Invisible anchor for auto-scrolling
                     Color.clear
                         .frame(height: 1)
                         .id(bottomAnchorID)
                 }
             }
             .scrollIndicators(.hidden)
-            .onChange(of: events.count) { _, _ in
+            .onChange(of: messages.count) { _, _ in
                 if autoScroll {
                     withAnimation(.easeOut(duration: 0.15)) {
                         proxy.scrollTo(bottomAnchorID, anchor: .bottom)
@@ -44,7 +41,22 @@ struct EventStreamView: View {
     }
 }
 
-/// Placeholder view when no events are being received.
+/// Single raw JSON message row — just the JSON, nothing else.
+struct RawMessageView: View {
+    let message: RawMessage
+
+    var body: some View {
+        Text(message.json)
+            .font(.system(size: 10, design: .monospaced))
+            .foregroundStyle(.primary.opacity(0.85))
+            .textSelection(.enabled)
+            .lineLimit(nil)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 2)
+    }
+}
+
+/// Placeholder view when no messages are being received.
 struct EmptyStreamView: View {
     let connectionStatus: AppState.ConnectionStatus
 
@@ -69,34 +81,25 @@ struct EmptyStreamView: View {
 
     private var statusIcon: String {
         switch connectionStatus {
-        case .disconnected:
-            return "wifi.slash"
-        case .connecting:
-            return "antenna.radiowaves.left.and.right"
-        case .connected:
-            return "eye.slash"
+        case .disconnected: return "wifi.slash"
+        case .connecting: return "antenna.radiowaves.left.and.right"
+        case .connected: return "eye.slash"
         }
     }
 
     private var statusTitle: String {
         switch connectionStatus {
-        case .disconnected:
-            return "Disconnected"
-        case .connecting:
-            return "Connecting..."
-        case .connected:
-            return "Waiting for Events"
+        case .disconnected: return "Disconnected"
+        case .connecting: return "Connecting..."
+        case .connected: return "Waiting for Events"
         }
     }
 
     private var statusMessage: String {
         switch connectionStatus {
-        case .disconnected:
-            return "The Python bridge is not running. Click the play button to start."
-        case .connecting:
-            return "Establishing connection to the accessibility bridge..."
-        case .connected:
-            return "Switch to another application to see its accessibility events here."
+        case .disconnected: return "The Python bridge is not running."
+        case .connecting: return "Connecting to the accessibility bridge..."
+        case .connected: return "Switch to another app to see raw JSON events."
         }
     }
 }
