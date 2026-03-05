@@ -149,6 +149,7 @@ final class WebSocketService {
         case .pong:
             break
         default:
+            print("[Event] \(parsed.rawText)")
             delegate?.appendMessage(parsed.rawText)
         }
 
