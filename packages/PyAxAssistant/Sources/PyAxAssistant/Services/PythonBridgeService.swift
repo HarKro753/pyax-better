@@ -31,6 +31,9 @@ final class PythonBridgeService {
 
     // MARK: - Lifecycle
 
+    /// The port used by the Python bridge WebSocket server.
+    private static let bridgePort: UInt16 = 8765
+
     func start() {
         guard status == .stopped || {
             if case .error = status { return true }
@@ -38,6 +41,9 @@ final class PythonBridgeService {
         }() else { return }
 
         status = .starting
+
+        // Kill any orphaned process still holding the bridge port
+        Self.killProcessOnPort(Self.bridgePort)
 
         let process = Process()
         let outputPipe = Pipe()
@@ -96,10 +102,22 @@ final class PythonBridgeService {
         }
 
         process.terminate()
-        // Give it a moment to clean up, then force kill if needed
-        DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            if process.isRunning {
-                process.interrupt()
+
+        // Wait for graceful exit on a background queue, then force-kill if needed
+        let capturedProcess = process
+        DispatchQueue.global().async { [weak self] in
+            // Give the process up to 2 seconds to terminate gracefully
+            for _ in 0..<20 {
+                if !capturedProcess.isRunning { break }
+                usleep(100_000) // 100ms
+            }
+            if capturedProcess.isRunning {
+                capturedProcess.interrupt()
+                usleep(500_000) // 500ms
+                if capturedProcess.isRunning {
+                    // Last resort: kill via pid
+                    kill(capturedProcess.processIdentifier, SIGKILL)
+                }
             }
             Task { @MainActor in
                 self?.status = .stopped
@@ -118,6 +136,54 @@ final class PythonBridgeService {
         Task {
             try? await Task.sleep(for: .seconds(1))
             start()
+        }
+    }
+
+    // MARK: - Port Management
+
+    /// Kill any process currently listening on the given TCP port.
+    /// Uses `lsof` to find the PID, then sends SIGTERM followed by SIGKILL if needed.
+    private static func killProcessOnPort(_ port: UInt16) {
+        // Use lsof to find PIDs listening on the port
+        let lsof = Process()
+        let pipe = Pipe()
+        lsof.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        lsof.arguments = ["-ti", "tcp:\(port)"]
+        lsof.standardOutput = pipe
+        lsof.standardError = FileHandle.nullDevice
+
+        do {
+            try lsof.run()
+            lsof.waitUntilExit()
+        } catch {
+            return
+        }
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !output.isEmpty else {
+            return
+        }
+
+        // Parse PIDs (one per line) and kill each
+        let myPID = ProcessInfo.processInfo.processIdentifier
+        let pids = output.split(separator: "\n").compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
+
+        for pid in pids where pid != myPID {
+            print("[PythonBridge] Killing orphaned process on port \(port): PID \(pid)")
+            kill(pid, SIGTERM)
+        }
+
+        // Brief wait, then force-kill any survivors
+        if !pids.isEmpty {
+            usleep(500_000) // 500ms
+            for pid in pids where pid != myPID {
+                // Check if still alive (kill with signal 0 tests existence)
+                if kill(pid, 0) == 0 {
+                    print("[PythonBridge] Force-killing PID \(pid)")
+                    kill(pid, SIGKILL)
+                }
+            }
         }
     }
 

@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import signal
+import socket
 import sys
 import threading
 import traceback
@@ -955,7 +956,17 @@ class WebSocketServer:
 
     async def serve(self):
         print(f"[bridge] WebSocket listening on ws://{HOST}:{PORT}", flush=True)
-        async with websockets.serve(self.handle_client, HOST, PORT):
+        # SO_REUSEADDR allows immediate rebind after restart (avoids TIME_WAIT)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except (AttributeError, OSError):
+            pass  # SO_REUSEPORT not available on all platforms
+        sock.bind((HOST, PORT))
+        sock.listen()
+        sock.setblocking(False)
+        async with websockets.serve(self.handle_client, sock=sock):
             await self.event_pump()
 
 
@@ -977,8 +988,27 @@ def _run_websocket_thread():
 # =============================================================================
 
 
+def _set_background_only():
+    """
+    Mark this process as a background-only agent so it doesn't appear
+    in the Dock, app switcher, or steal focus from the observed app.
+    Must be called before CFRunLoopRun.
+    """
+    try:
+        from AppKit import NSApplication, NSApplicationActivationPolicyProhibited
+
+        app = NSApplication.sharedApplication()
+        app.setActivationPolicy_(NSApplicationActivationPolicyProhibited)
+        print("[bridge] Set activation policy to background-only", flush=True)
+    except Exception as e:
+        print(f"[bridge] Warning: Could not set background policy: {e}", flush=True)
+
+
 def run():
     """Main entry — starts WebSocket thread, then runs CFRunLoop on main thread."""
+    # Prevent this process from appearing as a GUI app (Dock, app switcher)
+    _set_background_only()
+
     print("[bridge] Starting PyAx Assistant Bridge", flush=True)
     print(
         "[bridge] Commands: get_tree, find_elements, get_element, perform_action,",
