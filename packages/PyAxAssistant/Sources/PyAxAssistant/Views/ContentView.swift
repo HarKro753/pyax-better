@@ -1,6 +1,7 @@
 import SwiftUI
 
 /// Main content view composing the status bar, search, and event stream.
+/// Designed for a translucent floating panel — all backgrounds are clear/glassy.
 struct ContentView: View {
     @State private var appState = AppState()
     @State private var webSocket = WebSocketService()
@@ -8,7 +9,7 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Status bar with connection info and controls
+            // Draggable title area with status
             StatusBarView(
                 observedAppName: appState.observedAppName,
                 connectionStatus: appState.connectionStatus,
@@ -20,6 +21,7 @@ struct ContentView: View {
             )
 
             Divider()
+                .opacity(0.3)
 
             // Search/filter bar
             SearchBar(filterText: Binding(
@@ -28,6 +30,7 @@ struct ContentView: View {
             ))
 
             Divider()
+                .opacity(0.3)
 
             // Event stream or empty state
             if appState.filteredEvents.isEmpty {
@@ -39,7 +42,7 @@ struct ContentView: View {
                 )
             }
         }
-        .frame(minWidth: 500, minHeight: 400)
+        .frame(minWidth: 340, minHeight: 300)
         .task {
             setupWebSocketCallbacks()
             startBridge()
@@ -101,12 +104,12 @@ private struct SearchBar: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .foregroundStyle(.tertiary)
-                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .font(.system(size: 11))
 
             TextField("Filter events...", text: $filterText)
                 .textFieldStyle(.plain)
-                .font(.system(.subheadline))
+                .font(.system(.caption))
 
             if !filterText.isEmpty {
                 Button {
@@ -114,13 +117,12 @@ private struct SearchBar: View {
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(.tertiary)
-                        .font(.system(size: 12))
+                        .font(.system(size: 11))
                 }
                 .buttonStyle(.plain)
             }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(.bar)
+        .padding(.vertical, 5)
     }
 }

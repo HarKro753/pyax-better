@@ -1,8 +1,7 @@
 import SwiftUI
 
 /// Chat-style scrolling event stream that displays accessibility events.
-/// Uses LazyVStack for performance with large numbers of events
-/// and ScrollViewReader for auto-scrolling to the latest event.
+/// Uses LazyVStack for performance and ScrollViewReader for auto-scrolling.
 struct EventStreamView: View {
     let events: [AccessibilityEvent]
     let autoScroll: Bool
@@ -18,7 +17,8 @@ struct EventStreamView: View {
                             .id(event.id)
 
                         Divider()
-                            .padding(.leading, 50)
+                            .opacity(0.15)
+                            .padding(.leading, 40)
                     }
 
                     // Invisible anchor for auto-scrolling
@@ -27,7 +27,7 @@ struct EventStreamView: View {
                         .id(bottomAnchorID)
                 }
             }
-            .scrollIndicators(.automatic)
+            .scrollIndicators(.hidden)
             .onChange(of: events.count) { _, _ in
                 if autoScroll {
                     withAnimation(.easeOut(duration: 0.15)) {
@@ -49,20 +49,20 @@ struct EmptyStreamView: View {
     let connectionStatus: AppState.ConnectionStatus
 
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 12) {
             Image(systemName: statusIcon)
-                .font(.system(size: 48))
+                .font(.system(size: 32))
                 .foregroundStyle(.tertiary)
 
             Text(statusTitle)
-                .font(.headline)
+                .font(.system(.caption, weight: .semibold))
                 .foregroundStyle(.secondary)
 
             Text(statusMessage)
-                .font(.subheadline)
+                .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 280)
+                .frame(maxWidth: 240)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -96,7 +96,7 @@ struct EmptyStreamView: View {
         case .connecting:
             return "Establishing connection to the accessibility bridge..."
         case .connected:
-            return "Switch to another application to see its accessibility events streamed here."
+            return "Switch to another application to see its accessibility events here."
         }
     }
 }

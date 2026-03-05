@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Status bar at the top of the window showing connection state and observed app.
+/// Status bar at the top of the overlay showing connection state and observed app.
 struct StatusBarView: View {
     let observedAppName: String?
     let connectionStatus: AppState.ConnectionStatus
@@ -11,31 +11,31 @@ struct StatusBarView: View {
     let onToggleBridge: () -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             // Connection indicator
             ConnectionIndicator(status: connectionStatus)
 
             // App name
             VStack(alignment: .leading, spacing: 1) {
                 Text(observedAppName ?? "No App Focused")
-                    .font(.system(.subheadline, weight: .semibold))
+                    .font(.system(.caption, weight: .semibold))
                     .foregroundStyle(observedAppName != nil ? .primary : .secondary)
 
                 Text(statusLabel)
-                    .font(.caption2)
+                    .font(.system(size: 9))
                     .foregroundStyle(.secondary)
             }
 
             Spacer()
 
-            // Event counter
-            Text("\(eventCount) events")
-                .font(.system(.caption, design: .monospaced))
+            // Event counter pill
+            Text("\(eventCount)")
+                .font(.system(.caption2, design: .monospaced, weight: .medium))
                 .foregroundStyle(.secondary)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(.quaternary)
-                .clipShape(.rect(cornerRadius: 6))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(.white.opacity(0.1))
+                .clipShape(.rect(cornerRadius: 4))
 
             // Controls
             ToolbarControls(
@@ -46,9 +46,8 @@ struct StatusBarView: View {
                 onToggleBridge: onToggleBridge
             )
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(.bar)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
     }
 
     private var statusLabel: String {
@@ -72,10 +71,10 @@ private struct ConnectionIndicator: View {
     var body: some View {
         Circle()
             .fill(indicatorColor)
-            .frame(width: 10, height: 10)
+            .frame(width: 8, height: 8)
             .overlay {
                 Circle()
-                    .stroke(indicatorColor.opacity(0.4), lineWidth: 2)
+                    .stroke(indicatorColor.opacity(0.4), lineWidth: 1.5)
                     .scaleEffect(isAnimating ? 2.0 : 1.0)
                     .opacity(isAnimating ? 0 : 1)
             }
@@ -105,7 +104,7 @@ private struct ConnectionIndicator: View {
     }
 }
 
-/// Toolbar control buttons.
+/// Toolbar control buttons — small, glassy style.
 private struct ToolbarControls: View {
     let isPaused: Bool
     let connectionStatus: AppState.ConnectionStatus
@@ -114,34 +113,38 @@ private struct ToolbarControls: View {
     let onToggleBridge: () -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
-            // Start/Stop Bridge
-            Button(action: onToggleBridge) {
-                Image(systemName: connectionStatus == .connected ? "stop.fill" : "play.fill")
-                    .font(.system(size: 12))
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .help(connectionStatus == .connected ? "Stop bridge" : "Start bridge")
+        HStack(spacing: 4) {
+            overlayButton(
+                icon: connectionStatus == .connected ? "stop.fill" : "play.fill",
+                action: onToggleBridge,
+                help: connectionStatus == .connected ? "Stop bridge" : "Start bridge"
+            )
 
-            // Pause/Resume
-            Button(action: onTogglePause) {
-                Image(systemName: isPaused ? "play" : "pause")
-                    .font(.system(size: 12))
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            overlayButton(
+                icon: isPaused ? "play" : "pause",
+                action: onTogglePause,
+                help: isPaused ? "Resume" : "Pause"
+            )
             .disabled(connectionStatus != .connected)
-            .help(isPaused ? "Resume streaming" : "Pause streaming")
 
-            // Clear
-            Button(action: onClear) {
-                Image(systemName: "trash")
-                    .font(.system(size: 12))
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .help("Clear events")
+            overlayButton(
+                icon: "trash",
+                action: onClear,
+                help: "Clear"
+            )
         }
+    }
+
+    private func overlayButton(icon: String, action: @escaping () -> Void, help: String) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .medium))
+                .frame(width: 22, height: 22)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .background(.white.opacity(0.08))
+        .clipShape(.rect(cornerRadius: 5))
+        .help(help)
     }
 }

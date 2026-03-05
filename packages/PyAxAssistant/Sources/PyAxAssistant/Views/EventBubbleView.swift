@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// A single event bubble displayed in the chat-style event stream.
-/// Extracted as a separate struct for optimal SwiftUI diffing performance.
+/// Styled for the translucent overlay — uses subtle, glassy elements.
 struct EventBubbleView: View {
     let event: AccessibilityEvent
 
@@ -12,43 +12,43 @@ struct EventBubbleView: View {
     }()
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: 8) {
             // Event type icon
             Image(systemName: event.iconName)
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(categoryColor)
-                .frame(width: 28, height: 28)
-                .background(categoryColor.opacity(0.15))
-                .clipShape(.rect(cornerRadius: 8))
+                .frame(width: 22, height: 22)
+                .background(categoryColor.opacity(0.12))
+                .clipShape(.rect(cornerRadius: 6))
 
             // Event content
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(event.notificationLabel)
-                        .font(.system(.subheadline, design: .monospaced, weight: .semibold))
+                        .font(.system(.caption, design: .monospaced, weight: .semibold))
                         .foregroundStyle(categoryColor)
 
                     Spacer()
 
                     Text(Self.timeFormatter.string(from: event.timestamp))
-                        .font(.system(.caption2, design: .monospaced))
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 9, weight: .regular, design: .monospaced))
+                        .foregroundStyle(.secondary.opacity(0.7))
                 }
 
                 if let role = event.role, !role.isEmpty {
                     HStack(spacing: 4) {
                         Text(role)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.primary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(.quaternary)
-                            .clipShape(.rect(cornerRadius: 4))
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.primary.opacity(0.8))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(.white.opacity(0.08))
+                            .clipShape(.rect(cornerRadius: 3))
 
                         if let title = event.title, !title.isEmpty {
                             Text(title)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary.opacity(0.7))
                                 .lineLimit(1)
                         }
                     }
@@ -56,14 +56,14 @@ struct EventBubbleView: View {
 
                 if let value = event.value, !value.isEmpty, value != "None" {
                     Text(value)
-                        .font(.caption)
+                        .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
-                        .lineLimit(2)
+                        .lineLimit(1)
                 }
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
     }
 
     private var categoryColor: Color {

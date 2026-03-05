@@ -3,31 +3,37 @@ import AppKit
 
 /// PyAx Assistant - A macOS accessibility event viewer and agent.
 ///
-/// This app connects to a Python bridge process that uses the pyax library
-/// to observe accessibility events from the currently focused application
-/// and streams them in a chat-style interface.
-///
-/// The app runs as an "accessory" so it doesn't steal focus from
-/// the application being observed.
+/// Runs as a floating overlay panel (like Cluely) that stays on top
+/// of all windows with a frosted glass background. Does not steal
+/// focus from the application being observed.
 @main
 struct PyAxAssistantApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        // We use a hidden WindowGroup as a workaround —
+        // the actual UI is shown via the floating NSPanel from AppDelegate.
+        Settings {
+            EmptyView()
         }
-        .windowStyle(.titleBar)
-        .defaultSize(width: 600, height: 700)
     }
 }
 
-/// App delegate to configure the app as an accessory (non-activating).
-/// This prevents the app from stealing focus when users click in other apps.
+/// App delegate that creates and manages the floating overlay panel.
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var panelController: FloatingPanelController?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Accessory policy: app doesn't appear in Dock, doesn't steal focus
-        // from the observed app. The window still shows in the window list.
+        // Accessory: no Dock icon, doesn't activate over other apps
         NSApp.setActivationPolicy(.accessory)
+
+        // Create and show the floating panel with our SwiftUI content
+        let controller = FloatingPanelController()
+        controller.show(content: ContentView())
+        self.panelController = controller
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        true
     }
 }
