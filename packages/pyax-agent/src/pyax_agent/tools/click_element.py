@@ -7,7 +7,7 @@ or by search criteria.
 import json
 import logging
 
-from anthropic import beta_async_tool
+from claude_agent_sdk import tool
 
 from pyax_agent.bridge_client import BridgeClient
 
@@ -17,21 +17,17 @@ logger = logging.getLogger(__name__)
 def create_click_element(bridge: BridgeClient):
     """Create a click_element tool with the bridge client captured in closure."""
 
-    @beta_async_tool
-    async def click_element(
-        path: list[int] = [],
-        role: str = "",
-        title: str = "",
-    ) -> str:
-        """Click (AXPress) a UI element such as a button, link, menu item, or checkbox.
+    @tool(
+        "click_element",
+        "Click (AXPress) a UI element such as a button, link, menu item, or checkbox. "
+        "Identify the element by its path or by search criteria (role, title).",
+        {"path": list, "role": str, "title": str},
+    )
+    async def click_element(args: dict) -> dict:
+        path = args.get("path", [])
+        role = args.get("role", "")
+        title = args.get("title", "")
 
-        Identify the element by its path or by search criteria (role, title).
-
-        Args:
-            path: Child index path to the element, e.g. [0, 3, 2]. Use this if you know the path from a previous get_ui_tree or find_elements call.
-            role: Element role to search for, e.g. 'AXButton'. Used when path is not provided.
-            title: Element title to search for, e.g. 'Submit'. Used when path is not provided.
-        """
         kwargs: dict = {"action": "AXPress"}
 
         if path:
@@ -44,13 +40,18 @@ def create_click_element(bridge: BridgeClient):
                 criteria["title"] = title
             kwargs["criteria"] = criteria
         else:
-            return json.dumps({"error": "Either path or search criteria (role, title) is required"})
+            result = json.dumps(
+                {"error": "Either path or search criteria (role, title) is required"}
+            )
+            return {"content": [{"type": "text", "text": result}]}
 
         response = await bridge.send_command("perform_action", **kwargs)
 
         if "error" in response:
-            return json.dumps({"error": response["error"]})
+            result = json.dumps({"error": response["error"]})
+        else:
+            result = json.dumps({"success": response.get("success", False)})
 
-        return json.dumps({"success": response.get("success", False)})
+        return {"content": [{"type": "text", "text": result}]}
 
     return click_element

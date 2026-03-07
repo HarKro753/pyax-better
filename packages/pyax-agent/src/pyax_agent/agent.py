@@ -1,11 +1,11 @@
-"""Core agent loop using the Anthropic SDK's tool_runner.
+"""Core agent loop using the Claude Agent SDK.
 
 The SDK handles:
-  - Tool schema generation (@beta_async_tool decorator)
-  - Tool dispatch (tool_runner iterates tool_use → call → result automatically)
-  - API key from environment (ANTHROPIC_API_KEY, no manual config needed)
+  - Tool dispatch via in-process MCP servers
+  - Authentication via Claude Code CLI (~/.claude, no ANTHROPIC_API_KEY needed)
+  - Multi-turn conversation with automatic tool_use → call → result loops
 
-We wrap the tool_runner to emit SSE events for the Swift frontend.
+We wrap the SDK's query() to emit SSE events for the Swift frontend.
 """
 
 from __future__ import annotations
@@ -15,7 +15,18 @@ import logging
 from collections.abc import AsyncGenerator
 from typing import Any
 
-import anthropic
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ResultMessage,
+    SystemMessage,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+    query,
+)
 
 from pyax_agent.bridge_client import BridgeClient
 from pyax_agent.config import AgentConfig
@@ -28,11 +39,11 @@ from pyax_agent.models.sse import (
     ToolCallEvent,
     ToolResultEvent,
 )
-from pyax_agent.tools.registry import create_all_tools
+from pyax_agent.tools.registry import create_mcp_server
 
 logger = logging.getLogger(__name__)
 
-# System prompt for Phase 1 (without memory files)
+# System prompt for the accessibility agent
 SYSTEM_PROMPT = """\
 You are an accessibility assistant that helps users interact with macOS \
 applications. You can inspect the UI, find elements, click buttons, and type text.
@@ -56,7 +67,7 @@ You have access to tools that let you:
 
 
 class AgentLoop:
-    """Runs the Anthropic tool_use agent loop via the SDK's tool_runner.
+    """Runs the Claude Agent SDK loop.
 
     Each call to `run()` processes a user message through Claude,
     executing tools as needed, and yields SSE events for streaming.
@@ -66,17 +77,35 @@ class AgentLoop:
         self,
         config: AgentConfig,
         bridge: BridgeClient,
-        client: anthropic.AsyncAnthropic | None = None,
+        query_fn: Any = None,
     ) -> None:
         self.config = config
         self.bridge = bridge
-        self._client = client or anthropic.AsyncAnthropic()
-        self._tools = create_all_tools(bridge)
+        self._query_fn = query_fn or query
+        self._mcp_server = create_mcp_server(bridge)
         self._cancelled = False
 
     def cancel(self) -> None:
         """Cancel the current agent loop."""
         self._cancelled = True
+
+    def _build_options(self) -> ClaudeAgentOptions:
+        """Build ClaudeAgentOptions from our config."""
+        return ClaudeAgentOptions(
+            system_prompt=SYSTEM_PROMPT,
+            model=self.config.model,
+            max_turns=self.config.max_turns,
+            permission_mode=self.config.permission_mode,
+            mcp_servers={"pyax-tools": self._mcp_server},
+            allowed_tools=[
+                "mcp__pyax-tools__get_ui_tree",
+                "mcp__pyax-tools__find_elements",
+                "mcp__pyax-tools__get_element",
+                "mcp__pyax-tools__click_element",
+                "mcp__pyax-tools__type_text",
+                "mcp__pyax-tools__get_focused_element",
+            ],
+        )
 
     async def run(
         self,
@@ -85,110 +114,132 @@ class AgentLoop:
     ) -> AsyncGenerator[SSEEvent, None]:
         """Run the agent loop for a user message.
 
-        Uses the SDK's tool_runner which automatically:
-        1. Sends messages + tools to Claude
-        2. If Claude returns tool_use, calls the tool and feeds results back
-        3. Repeats until Claude returns a text-only response
+        Uses the Claude Agent SDK's query() which automatically:
+        1. Sends messages + tools to Claude via Claude Code CLI
+        2. If Claude returns tool_use, calls the MCP tool and feeds results back
+        3. Repeats until Claude returns a text-only response (ResultMessage)
 
-        We iterate the runner and emit SSE events at each step.
+        We iterate the yielded messages and emit SSE events at each step.
 
         Args:
             message: The user's message text.
-            conversation_history: Optional list of previous messages.
+            conversation_history: Optional list of previous messages (unused with SDK,
+                reserved for future session continuation).
 
         Yields:
             SSEEvent objects for each step (thinking, tool calls, response).
         """
         self._cancelled = False
 
-        # Build messages list
-        messages: list[dict[str, Any]] = list(conversation_history or [])
-        messages.append({"role": "user", "content": message})
-
         yield ThinkingEvent(status="analyzing_request")
 
         try:
-            runner = self._client.beta.messages.tool_runner(
-                model=self.config.model,
-                max_tokens=self.config.max_tokens,
-                system=SYSTEM_PROMPT,
-                tools=self._tools,
-                messages=messages,
-                max_iterations=self.config.max_turns,
-            )
+            options = self._build_options()
 
-            async for response in runner:
+            async for msg in self._query_fn(prompt=message, options=options):
                 if self._cancelled:
                     yield ErrorEvent(message="Agent loop cancelled")
                     yield DoneEvent()
                     return
 
-                # Process content blocks from this response
-                for block in response.content:
-                    if block.type == "text" and block.text:
-                        # Text block — could be intermediate or final
-                        pass
-                    elif block.type == "tool_use":
-                        # Emit tool call event
-                        yield ToolCallEvent(
-                            tool=block.name,
-                            input=block.input if isinstance(block.input, dict) else {},
-                        )
+                # Map SDK message types to our SSE events
+                events = self._process_message(msg)
+                for event in events:
+                    yield event
 
-                # If this response has tool_use blocks, the runner will call them.
-                # We need to emit tool_result events for the tool calls that were made.
-                tool_response = await runner.generate_tool_call_response()
-                if tool_response is not None:
-                    # Extract tool results from the generated response
-                    for result_block in tool_response.get("content", []):
-                        if (
-                            isinstance(result_block, dict)
-                            and result_block.get("type") == "tool_result"
-                        ):
-                            tool_use_id = result_block.get("tool_use_id", "")
-                            content = result_block.get("content", "")
-                            is_error = result_block.get("is_error", False)
-
-                            # Find the tool name from the response's tool_use blocks
-                            tool_name = ""
-                            for block in response.content:
-                                if block.type == "tool_use" and block.id == tool_use_id:
-                                    tool_name = block.name
-                                    break
-
-                            # Parse result for SSE
-                            try:
-                                result_data = (
-                                    json.loads(content) if isinstance(content, str) else content
-                                )
-                            except (json.JSONDecodeError, TypeError):
-                                result_data = {"raw": str(content)}
-
-                            if is_error:
-                                result_data = {"error": str(content)}
-
-                            yield ToolResultEvent(tool=tool_name, result=result_data)
-
-            # After the runner completes, extract the final text response
-            final_message = await runner.until_done()
-            text = self._extract_text(final_message)
-            if text:
-                yield MessageEvent(content=text)
-
-        except anthropic.APIError as e:
-            logger.error("Anthropic API error: %s", e)
-            yield ErrorEvent(message=f"API error: {e}")
         except Exception as e:
-            logger.error("Unexpected error in agent loop: %s", e)
-            yield ErrorEvent(message=f"Unexpected error: {e}")
+            logger.error("Agent SDK error: %s", e)
+            yield ErrorEvent(message=f"Agent error: {e}")
 
         yield DoneEvent()
 
+    def _process_message(self, msg: Any) -> list[SSEEvent]:
+        """Convert a Claude Agent SDK message to SSE events.
+
+        Args:
+            msg: A message from the SDK (AssistantMessage, ResultMessage, etc.)
+
+        Returns:
+            List of SSE events to emit.
+        """
+        events: list[SSEEvent] = []
+
+        if isinstance(msg, AssistantMessage):
+            for block in msg.content:
+                if isinstance(block, TextBlock) and block.text:
+                    # Intermediate text from assistant (thinking aloud)
+                    events.append(MessageEvent(content=block.text))
+                elif isinstance(block, ToolUseBlock):
+                    events.append(
+                        ToolCallEvent(
+                            tool=self._strip_mcp_prefix(block.name),
+                            input=block.input if isinstance(block.input, dict) else {},
+                        )
+                    )
+                elif isinstance(block, ToolResultBlock):
+                    # Tool result block in assistant message
+                    tool_name = ""
+                    result_data = self._parse_tool_result(block.content)
+                    if block.is_error:
+                        result_data = {"error": str(block.content)}
+                    events.append(ToolResultEvent(tool=tool_name, result=result_data))
+                elif isinstance(block, ThinkingBlock):
+                    events.append(ThinkingEvent(status="reasoning"))
+
+        elif isinstance(msg, ResultMessage):
+            # Final result — extract text
+            if msg.result:
+                events.append(MessageEvent(content=msg.result))
+
+        elif isinstance(msg, UserMessage):
+            # User messages may contain tool results forwarded by the SDK
+            if hasattr(msg, "content") and isinstance(msg.content, list):
+                for block in msg.content:
+                    if isinstance(block, ToolResultBlock):
+                        result_data = self._parse_tool_result(block.content)
+                        if block.is_error:
+                            result_data = {"error": str(block.content)}
+                        events.append(ToolResultEvent(tool="", result=result_data))
+
+        elif isinstance(msg, SystemMessage):
+            # System messages (e.g., errors from the SDK)
+            # SystemMessage has .subtype and .data (dict)
+            events.append(ThinkingEvent(status="system"))
+
+        return events
+
     @staticmethod
-    def _extract_text(response: Any) -> str:
-        """Extract text content from a Claude response."""
-        texts = []
-        for block in response.content:
-            if block.type == "text":
-                texts.append(block.text)
-        return "\n".join(texts)
+    def _strip_mcp_prefix(name: str) -> str:
+        """Strip the 'mcp__pyax-tools__' prefix from tool names.
+
+        The SDK prefixes MCP tool names with 'mcp__<server>__'.
+        We strip this for cleaner SSE events.
+        """
+        prefix = "mcp__pyax-tools__"
+        if name.startswith(prefix):
+            return name[len(prefix) :]
+        return name
+
+    @staticmethod
+    def _parse_tool_result(content: Any) -> Any:
+        """Parse tool result content into a dict for SSE serialization."""
+        if content is None:
+            return {}
+        if isinstance(content, str):
+            try:
+                return json.loads(content)
+            except (json.JSONDecodeError, TypeError):
+                return {"raw": content}
+        if isinstance(content, list):
+            # List of content blocks — extract text
+            texts = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text = item.get("text", "")
+                    try:
+                        return json.loads(text)
+                    except (json.JSONDecodeError, TypeError):
+                        texts.append(text)
+            if texts:
+                return {"raw": "\n".join(texts)}
+        return {"raw": str(content)}

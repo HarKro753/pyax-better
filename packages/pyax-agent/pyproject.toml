@@ -9,7 +9,7 @@ description = "AI-powered accessibility agent for pyax"
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = [
-    "anthropic>=0.84.0",
+    "claude-agent-sdk>=0.1.48",
     "starlette>=0.41.0",
     "uvicorn[standard]>=0.32.0",
     "websockets>=12.0",

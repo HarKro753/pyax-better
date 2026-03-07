@@ -6,7 +6,7 @@ Identifies the text field by path or by search criteria.
 import json
 import logging
 
-from anthropic import beta_async_tool
+from claude_agent_sdk import tool
 
 from pyax_agent.bridge_client import BridgeClient
 
@@ -16,25 +16,21 @@ logger = logging.getLogger(__name__)
 def create_type_text(bridge: BridgeClient):
     """Create a type_text tool with the bridge client captured in closure."""
 
-    @beta_async_tool
-    async def type_text(
-        text: str,
-        path: list[int] = [],
-        role: str = "",
-        title: str = "",
-    ) -> str:
-        """Type text into a text field. Focuses the element and sets its value.
+    @tool(
+        "type_text",
+        "Type text into a text field. Focuses the element and sets its value. "
+        "Identify the text field by path or by search criteria (role, title).",
+        {"text": str, "path": list, "role": str, "title": str},
+    )
+    async def type_text(args: dict) -> dict:
+        text = args.get("text", "")
+        path = args.get("path", [])
+        role = args.get("role", "")
+        title = args.get("title", "")
 
-        Identify the text field by path or by search criteria (role, title).
-
-        Args:
-            text: The text to type into the field.
-            path: Child index path to the text field. Use this if you know the path from a previous call.
-            role: Element role to search for, e.g. 'AXTextField'. Used when path is not provided.
-            title: Element title to search for. Used when path is not provided.
-        """
         if not text:
-            return json.dumps({"error": "text parameter is required"})
+            result = json.dumps({"error": "text parameter is required"})
+            return {"content": [{"type": "text", "text": result}]}
 
         # Build targeting kwargs
         target_kwargs: dict = {}
@@ -48,7 +44,10 @@ def create_type_text(bridge: BridgeClient):
                 criteria["title"] = title
             target_kwargs["criteria"] = criteria
         else:
-            return json.dumps({"error": "Either path or search criteria (role, title) is required"})
+            result = json.dumps(
+                {"error": "Either path or search criteria (role, title) is required"}
+            )
+            return {"content": [{"type": "text", "text": result}]}
 
         # Focus the element first
         await bridge.send_command(
@@ -61,8 +60,10 @@ def create_type_text(bridge: BridgeClient):
         )
 
         if "error" in response:
-            return json.dumps({"error": response["error"]})
+            result = json.dumps({"error": response["error"]})
+        else:
+            result = json.dumps({"success": response.get("success", False)})
 
-        return json.dumps({"success": response.get("success", False)})
+        return {"content": [{"type": "text", "text": result}]}
 
     return type_text

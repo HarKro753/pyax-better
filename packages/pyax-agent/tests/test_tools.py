@@ -4,7 +4,9 @@ import json
 
 import pytest
 
-from pyax_agent.tools.registry import TOOL_NAMES, create_all_tools
+from claude_agent_sdk import SdkMcpTool
+
+from pyax_agent.tools.registry import TOOL_NAMES, create_all_tools, create_mcp_server
 from pyax_agent.tools.get_ui_tree import create_get_ui_tree
 from pyax_agent.tools.find_elements import create_find_elements
 from pyax_agent.tools.get_element import create_get_element
@@ -38,6 +40,16 @@ class FakeBridge:
         return {"type": "response", "command": command}
 
 
+def _extract_text(result: dict) -> str:
+    """Extract text from a tool result dict."""
+    return result["content"][0]["text"]
+
+
+def _extract_json(result: dict) -> dict:
+    """Extract and parse JSON from a tool result dict."""
+    return json.loads(_extract_text(result))
+
+
 class TestRegistry:
     """Tests for the tool registry."""
 
@@ -55,30 +67,38 @@ class TestRegistry:
         names = {t.name for t in tools}
         assert names == set(TOOL_NAMES)
 
+    def test_all_are_sdk_mcp_tools(self):
+        bridge = FakeBridge()
+        tools = create_all_tools(bridge)
+        for t in tools:
+            assert isinstance(t, SdkMcpTool), f"{t.name} is not SdkMcpTool"
+
     def test_all_have_descriptions(self):
         bridge = FakeBridge()
         tools = create_all_tools(bridge)
-        for tool in tools:
-            assert tool.description, f"{tool.name} missing description"
+        for t in tools:
+            assert t.description, f"{t.name} missing description"
 
     def test_all_have_input_schemas(self):
         bridge = FakeBridge()
         tools = create_all_tools(bridge)
-        for tool in tools:
-            schema = tool.input_schema
-            assert schema["type"] == "object"
-            assert "properties" in schema
+        for t in tools:
+            schema = t.input_schema
+            assert isinstance(schema, dict), f"{t.name} schema is not a dict"
 
-    def test_to_dict_format(self):
-        """All tools should produce valid Anthropic tool definitions."""
+    def test_all_have_handlers(self):
+        """All tools should have an async handler callable."""
         bridge = FakeBridge()
         tools = create_all_tools(bridge)
-        for tool in tools:
-            d = tool.to_dict()
-            assert "name" in d
-            assert "description" in d
-            assert "input_schema" in d
-            assert d["input_schema"]["type"] == "object"
+        for t in tools:
+            assert callable(t.handler), f"{t.name} missing handler"
+
+    def test_create_mcp_server(self):
+        """create_mcp_server should return an McpSdkServerConfig."""
+        bridge = FakeBridge()
+        server_config = create_mcp_server(bridge)
+        # It should be a config object usable by ClaudeAgentOptions
+        assert server_config is not None
 
 
 class TestGetUITree:
@@ -89,7 +109,7 @@ class TestGetUITree:
         bridge = FakeBridge()
         bridge.set_response({"app": "Safari", "pid": 123, "tree": {"AXRole": "AXApplication"}})
         tool = create_get_ui_tree(bridge)
-        result = json.loads(await tool(depth=5))
+        result = _extract_json(await tool.handler({"depth": 5}))
         assert result["app"] == "Safari"
         assert result["pid"] == 123
         assert "tree" in result
@@ -99,7 +119,7 @@ class TestGetUITree:
         bridge = FakeBridge()
         bridge.set_response({"app": "Finder", "pid": 456, "tree": {}})
         tool = create_get_ui_tree(bridge)
-        await tool(depth=3)
+        await tool.handler({"depth": 3})
         assert bridge.commands[0]["depth"] == 3
 
     @pytest.mark.asyncio
@@ -107,7 +127,7 @@ class TestGetUITree:
         bridge = FakeBridge()
         bridge.set_response({"app": "Finder", "pid": 456, "tree": {}})
         tool = create_get_ui_tree(bridge)
-        await tool()
+        await tool.handler({})
         assert bridge.commands[0]["depth"] == 5
 
     @pytest.mark.asyncio
@@ -115,15 +135,14 @@ class TestGetUITree:
         bridge = FakeBridge()
         bridge.set_response({"error": "No focused app"})
         tool = create_get_ui_tree(bridge)
-        result = json.loads(await tool())
+        result = _extract_json(await tool.handler({}))
         assert "error" in result
 
-    @pytest.mark.asyncio
-    async def test_schema_excludes_bridge(self):
+    def test_schema_excludes_bridge(self):
         bridge = FakeBridge()
         tool = create_get_ui_tree(bridge)
-        props = tool.input_schema["properties"]
-        assert "bridge" not in props
+        schema = tool.input_schema
+        assert "bridge" not in schema
 
 
 class TestFindElements:
@@ -140,14 +159,14 @@ class TestFindElements:
             }
         )
         tool = create_find_elements(bridge)
-        result = json.loads(await tool(title="Submit"))
+        result = _extract_json(await tool.handler({"title": "Submit"}))
         assert result["count"] == 1
 
     @pytest.mark.asyncio
     async def test_no_criteria(self):
         bridge = FakeBridge()
         tool = create_find_elements(bridge)
-        result = json.loads(await tool())
+        result = _extract_json(await tool.handler({}))
         assert "error" in result
         assert "criterion" in result["error"]
 
@@ -156,7 +175,7 @@ class TestFindElements:
         bridge = FakeBridge()
         bridge.set_response({"app": "Test", "results": [], "count": 0})
         tool = create_find_elements(bridge)
-        await tool(role="AXButton", title="*submit*")
+        await tool.handler({"role": "AXButton", "title": "*submit*"})
         cmd = bridge.commands[0]
         assert cmd["criteria"]["role"] == "AXButton"
         assert cmd["criteria"]["title"] == "*submit*"
@@ -166,7 +185,7 @@ class TestFindElements:
         bridge = FakeBridge()
         bridge.set_response({"app": "Test", "results": [], "count": 0})
         tool = create_find_elements(bridge)
-        await tool(role="AXButton", max_results=5)
+        await tool.handler({"role": "AXButton", "max_results": 5})
         assert bridge.commands[0]["max_results"] == 5
 
 
@@ -178,7 +197,7 @@ class TestGetElement:
         bridge = FakeBridge()
         bridge.set_response({"path": [0, 1, 2], "element": {"AXRole": "AXButton"}})
         tool = create_get_element(bridge)
-        result = json.loads(await tool(path=[0, 1, 2]))
+        result = _extract_json(await tool.handler({"path": [0, 1, 2]}))
         assert result["element"]["AXRole"] == "AXButton"
         assert result["path"] == [0, 1, 2]
 
@@ -187,7 +206,7 @@ class TestGetElement:
         bridge = FakeBridge()
         bridge.set_response({"path": [0], "element": {}})
         tool = create_get_element(bridge)
-        await tool(path=[0], depth=3)
+        await tool.handler({"path": [0], "depth": 3})
         assert bridge.commands[0]["depth"] == 3
 
 
@@ -199,7 +218,7 @@ class TestClickElement:
         bridge = FakeBridge()
         bridge.set_response({"success": True})
         tool = create_click_element(bridge)
-        result = json.loads(await tool(path=[0, 1]))
+        result = _extract_json(await tool.handler({"path": [0, 1]}))
         assert result["success"] is True
         assert bridge.commands[0]["action"] == "AXPress"
         assert bridge.commands[0]["path"] == [0, 1]
@@ -209,7 +228,7 @@ class TestClickElement:
         bridge = FakeBridge()
         bridge.set_response({"success": True})
         tool = create_click_element(bridge)
-        result = json.loads(await tool(title="OK"))
+        result = _extract_json(await tool.handler({"title": "OK"}))
         assert result["success"] is True
         assert bridge.commands[0]["criteria"]["title"] == "OK"
 
@@ -217,7 +236,7 @@ class TestClickElement:
     async def test_missing_target(self):
         bridge = FakeBridge()
         tool = create_click_element(bridge)
-        result = json.loads(await tool())
+        result = _extract_json(await tool.handler({}))
         assert "error" in result
 
     @pytest.mark.asyncio
@@ -225,7 +244,7 @@ class TestClickElement:
         bridge = FakeBridge()
         bridge.set_response({"error": "Element not found"})
         tool = create_click_element(bridge)
-        result = json.loads(await tool(path=[0, 99]))
+        result = _extract_json(await tool.handler({"path": [0, 99]}))
         assert "error" in result
 
 
@@ -237,7 +256,7 @@ class TestTypeText:
         bridge = FakeBridge()
         bridge.set_responses([{"success": True}, {"success": True}])
         tool = create_type_text(bridge)
-        result = json.loads(await tool(text="Hello", path=[0, 1]))
+        result = _extract_json(await tool.handler({"text": "Hello", "path": [0, 1]}))
         assert result["success"] is True
         assert len(bridge.commands) == 2
         assert bridge.commands[0]["attribute"] == "AXFocused"
@@ -249,21 +268,21 @@ class TestTypeText:
         bridge = FakeBridge()
         bridge.set_responses([{"success": True}, {"success": True}])
         tool = create_type_text(bridge)
-        result = json.loads(await tool(text="World", role="AXTextField"))
+        result = _extract_json(await tool.handler({"text": "World", "role": "AXTextField"}))
         assert result["success"] is True
 
     @pytest.mark.asyncio
     async def test_empty_text(self):
         bridge = FakeBridge()
         tool = create_type_text(bridge)
-        result = json.loads(await tool(text="", path=[0]))
+        result = _extract_json(await tool.handler({"text": "", "path": [0]}))
         assert "error" in result
 
     @pytest.mark.asyncio
     async def test_missing_target(self):
         bridge = FakeBridge()
         tool = create_type_text(bridge)
-        result = json.loads(await tool(text="Hello"))
+        result = _extract_json(await tool.handler({"text": "Hello"}))
         assert "error" in result
 
     @pytest.mark.asyncio
@@ -271,7 +290,7 @@ class TestTypeText:
         bridge = FakeBridge()
         bridge.set_responses([{"success": True}, {"error": "Cannot set value"}])
         tool = create_type_text(bridge)
-        result = json.loads(await tool(text="test", path=[0, 1]))
+        result = _extract_json(await tool.handler({"text": "test", "path": [0, 1]}))
         assert "error" in result
 
 
@@ -283,7 +302,7 @@ class TestGetFocusedElement:
         bridge = FakeBridge()
         bridge.set_response({"element": {"AXRole": "AXTextField", "AXValue": "Hello"}})
         tool = create_get_focused_element(bridge)
-        result = json.loads(await tool())
+        result = _extract_json(await tool.handler({}))
         assert result["element"]["AXRole"] == "AXTextField"
 
     @pytest.mark.asyncio
@@ -291,5 +310,5 @@ class TestGetFocusedElement:
         bridge = FakeBridge()
         bridge.set_response({"error": "No focused element"})
         tool = create_get_focused_element(bridge)
-        result = json.loads(await tool())
+        result = _extract_json(await tool.handler({}))
         assert "error" in result
