@@ -548,23 +548,39 @@ class TestListWindows:
         bridge = FakeBridge()
         bridge.set_response(
             {
-                "app": "Finder",
                 "windows": [
-                    {"title": "Documents", "position": [0, 0], "size": [800, 600]},
-                    {"title": "Downloads", "position": [100, 100], "size": [700, 500]},
+                    {
+                        "app": "Finder",
+                        "AXTitle": "Documents",
+                        "AXFrame": {"x": 0, "y": 0, "w": 800, "h": 600},
+                    },
+                    {
+                        "app": "Finder",
+                        "AXTitle": "Downloads",
+                        "AXFrame": {"x": 100, "y": 100, "w": 700, "h": 500},
+                    },
+                    {
+                        "app": "Safari",
+                        "AXTitle": "Google",
+                        "AXFrame": {"x": 50, "y": 50, "w": 1200, "h": 800},
+                    },
                 ],
+                "count": 3,
             }
         )
         tool = create_list_windows(bridge)
         result = _extract_json(await tool.handler({}))
-        assert result["app"] == "Finder"
-        assert result["count"] == 2
-        assert len(result["windows"]) == 2
+        assert result["count"] == 3
+        assert len(result["windows"]) == 3
+        # Windows come from multiple apps
+        apps = {w["app"] for w in result["windows"]}
+        assert "Finder" in apps
+        assert "Safari" in apps
 
     @pytest.mark.asyncio
     async def test_no_windows(self):
         bridge = FakeBridge()
-        bridge.set_response({"app": "Finder", "windows": []})
+        bridge.set_response({"windows": [], "count": 0})
         tool = create_list_windows(bridge)
         result = _extract_json(await tool.handler({}))
         assert result["count"] == 0
@@ -572,18 +588,18 @@ class TestListWindows:
     @pytest.mark.asyncio
     async def test_error(self):
         bridge = FakeBridge()
-        bridge.set_response({"error": "No focused app"})
+        bridge.set_response({"error": "Something went wrong"})
         tool = create_list_windows(bridge)
         result = _extract_json(await tool.handler({}))
         assert "error" in result
 
     @pytest.mark.asyncio
-    async def test_sends_get_app_info_command(self):
+    async def test_sends_list_all_windows_command(self):
         bridge = FakeBridge()
-        bridge.set_response({"app": "Test", "windows": []})
+        bridge.set_response({"windows": [], "count": 0})
         tool = create_list_windows(bridge)
         await tool.handler({})
-        assert bridge.commands[0]["command"] == "get_app_info"
+        assert bridge.commands[0]["command"] == "list_all_windows"
 
 
 class TestHighlightElements:

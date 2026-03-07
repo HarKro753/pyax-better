@@ -1,6 +1,7 @@
-"""List windows tool — list all windows with titles, sizes, positions.
+"""List windows tool — list all windows across all running applications.
 
-Sends get_app_info to the bridge and extracts the window list.
+Sends list_all_windows to the bridge which iterates every running app
+and returns all their windows with titles, sizes, and positions.
 """
 
 import json
@@ -18,12 +19,14 @@ def create_list_windows(bridge: BridgeClient):
 
     @tool(
         "list_windows",
-        "List all windows of the currently focused application with their titles, "
-        "sizes, and positions. Useful for understanding the window layout.",
+        "List all windows across ALL running macOS applications (not just the "
+        "focused one) with their titles, sizes, positions, and owning app name. "
+        "Useful for understanding the full desktop layout and finding windows "
+        "in any application.",
         {},
     )
     async def list_windows(args: dict) -> dict:
-        response = await bridge.send_command("get_app_info")
+        response = await bridge.send_command("list_all_windows")
 
         if "error" in response:
             result = json.dumps({"error": response["error"]})
@@ -31,7 +34,6 @@ def create_list_windows(bridge: BridgeClient):
             windows = response.get("windows", [])
             result = json.dumps(
                 {
-                    "app": response.get("app", ""),
                     "windows": windows,
                     "count": len(windows),
                 }

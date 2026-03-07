@@ -408,6 +408,8 @@ class ObserverManager:
                 return self._cmd_get_focused_element(cmd, request_id)
             elif cmd_type == "get_app_info":
                 return self._cmd_get_app_info(cmd, request_id)
+            elif cmd_type == "list_all_windows":
+                return self._cmd_list_all_windows(cmd, request_id)
             else:
                 return {
                     "type": "response",
@@ -757,6 +759,70 @@ class ObserverManager:
             **info,
             "timestamp": datetime.now().isoformat(),
         }
+
+    def _cmd_list_all_windows(self, cmd, request_id):
+        """List windows from ALL running applications, not just the focused one."""
+        try:
+            from AppKit import NSWorkspace
+
+            running_apps = NSWorkspace.sharedWorkspace().runningApplications()
+
+            all_windows = []
+            for app in running_apps:
+                app_name = app.localizedName()
+                pid = app.processIdentifier()
+                if not app_name or pid <= 0:
+                    continue
+
+                try:
+                    app_element = pyax.get_application_from_pid(pid)
+                    if app_element is None:
+                        continue
+                    windows = app_element["AXWindows"]
+                    if not windows:
+                        continue
+                    for win in windows:
+                        w = {"app": app_name, "pid": pid}
+                        for attr in [
+                            "AXTitle",
+                            "AXRole",
+                            "AXFrame",
+                            "AXMain",
+                            "AXMinimized",
+                        ]:
+                            try:
+                                val = win[attr]
+                                if val is not None:
+                                    if attr == "AXFrame":
+                                        try:
+                                            w[attr] = val.to_dict()
+                                        except Exception:
+                                            w[attr] = _safe_str(val)
+                                    else:
+                                        w[attr] = _safe_str(val)
+                            except Exception:
+                                pass
+                        # Only include windows that have a title or are main
+                        if w.get("AXTitle") or w.get("AXMain"):
+                            all_windows.append(w)
+                except Exception:
+                    # Skip apps we can't access (no AX permissions, etc.)
+                    continue
+
+            return {
+                "type": "response",
+                "id": request_id,
+                "command": "list_all_windows",
+                "windows": all_windows,
+                "count": len(all_windows),
+                "timestamp": datetime.now().isoformat(),
+            }
+        except Exception as e:
+            return {
+                "type": "response",
+                "id": request_id,
+                "error": str(e),
+            }
 
     def _resolve_element(self, cmd):
         """Resolve a target element from a command — by path or by criteria."""
