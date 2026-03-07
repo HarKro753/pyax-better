@@ -30,6 +30,7 @@ from claude_agent_sdk import (
 
 from pyax_agent.bridge_client import BridgeClient
 from pyax_agent.config import AgentConfig
+from pyax_agent.event_emitter import EventEmitter
 from pyax_agent.models.sse import (
     DoneEvent,
     ErrorEvent,
@@ -39,28 +40,29 @@ from pyax_agent.models.sse import (
     ToolCallEvent,
     ToolResultEvent,
 )
-from pyax_agent.tools.registry import create_mcp_server
+from pyax_agent.tools.registry import TOOL_NAMES, create_mcp_server
 
 logger = logging.getLogger(__name__)
 
-# System prompt for the accessibility agent
+# System prompt for the accessibility agent.
+# Tool names, descriptions, and input schemas are injected automatically by the
+# MCP protocol — Claude sees every @tool decorator's metadata via the tool
+# catalog. The system prompt only needs to define *who the agent is* and *how
+# it should behave*.
 SYSTEM_PROMPT = """\
-You are an accessibility assistant that helps users interact with macOS \
-applications. You can inspect the UI, find elements, click buttons, and type text.
-
-## Your Capabilities
-
-You have access to tools that let you:
-- Inspect the current UI state (get_ui_tree, find_elements, get_element)
-- Click buttons and other elements (click_element)
-- Type text into fields (type_text)
-- Check what element has focus (get_focused_element)
+You are an accessibility assistant that helps disabled users interact with \
+macOS applications. You have tools to inspect UI elements, perform actions, \
+provide visual feedback, and capture screenshots — their names and schemas \
+are provided via the tool catalog.
 
 ## Guidelines
 
-- Use get_ui_tree first to understand the current UI layout
-- Use find_elements to search for specific elements by role, title, or value
-- Always verify an action succeeded by checking the UI state after performing it
+- Start by inspecting the UI tree to understand the current layout
+- Search for elements by role, title, or value when targeting specific UI
+- Always verify an action succeeded by checking the UI state afterward
+- Highlight elements before interacting with them so the user sees your target
+- Speak actions aloud when the user relies on voice output
+- Use screenshots only when visual context is needed (images, colors, layout)
 - Be concise but clear in your responses
 - If you can't find an element, explain what you see instead
 """
@@ -78,12 +80,19 @@ class AgentLoop:
         config: AgentConfig,
         bridge: BridgeClient,
         query_fn: Any = None,
+        emitter: EventEmitter | None = None,
     ) -> None:
         self.config = config
         self.bridge = bridge
         self._query_fn = query_fn or query
-        self._mcp_server = create_mcp_server(bridge)
+        self._emitter = emitter or EventEmitter()
+        self._mcp_server = create_mcp_server(bridge, self._emitter)
         self._cancelled = False
+
+    @property
+    def emitter(self) -> EventEmitter:
+        """The event emitter for Swift side-events."""
+        return self._emitter
 
     def cancel(self) -> None:
         """Cancel the current agent loop."""
@@ -91,20 +100,14 @@ class AgentLoop:
 
     def _build_options(self) -> ClaudeAgentOptions:
         """Build ClaudeAgentOptions from our config."""
+        allowed_tools = [f"mcp__pyax-tools__{name}" for name in TOOL_NAMES]
         return ClaudeAgentOptions(
             system_prompt=SYSTEM_PROMPT,
             model=self.config.model,
             max_turns=self.config.max_turns,
             permission_mode=self.config.permission_mode,
             mcp_servers={"pyax-tools": self._mcp_server},
-            allowed_tools=[
-                "mcp__pyax-tools__get_ui_tree",
-                "mcp__pyax-tools__find_elements",
-                "mcp__pyax-tools__get_element",
-                "mcp__pyax-tools__click_element",
-                "mcp__pyax-tools__type_text",
-                "mcp__pyax-tools__get_focused_element",
-            ],
+            allowed_tools=allowed_tools,
         )
 
     async def run(
@@ -120,6 +123,8 @@ class AgentLoop:
         3. Repeats until Claude returns a text-only response (ResultMessage)
 
         We iterate the yielded messages and emit SSE events at each step.
+        Side-events from tools (highlights, speak, etc.) are drained and yielded
+        after each SDK message.
 
         Args:
             message: The user's message text.
@@ -146,6 +151,10 @@ class AgentLoop:
                 events = self._process_message(msg)
                 for event in events:
                     yield event
+
+                # Also yield any side-events from tools (highlights, speak, etc.)
+                for side_event in self._emitter.drain():
+                    yield side_event
 
         except Exception as e:
             logger.error("Agent SDK error: %s", e)

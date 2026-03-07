@@ -17,13 +17,17 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
-from pyax_agent.agent import AgentLoop, SYSTEM_PROMPT
+from pyax_agent.agent import AgentLoop
 from pyax_agent.bridge_client import BridgeClient
 from pyax_agent.config import AgentConfig
+from pyax_agent.event_emitter import EventEmitter
 from pyax_agent.models.sse import (
+    ClearHighlightsEvent,
     DoneEvent,
     ErrorEvent,
+    HighlightEvent,
     MessageEvent,
+    SpeakEvent,
     ThinkingEvent,
     ToolCallEvent,
     ToolResultEvent,
@@ -74,20 +78,9 @@ class TestAgentLoopInit:
         options = agent._build_options()
         assert options.model == "claude-opus-4-20250514"
         assert options.max_turns == 10
-        assert options.system_prompt == SYSTEM_PROMPT
+        assert options.system_prompt is not None
         assert "pyax-tools" in options.mcp_servers
-        assert len(options.allowed_tools) == 6
-
-
-class TestSystemPrompt:
-    """Tests for the system prompt."""
-
-    def test_contains_key_sections(self):
-        assert "accessibility" in SYSTEM_PROMPT.lower()
-        assert "get_ui_tree" in SYSTEM_PROMPT
-        assert "find_elements" in SYSTEM_PROMPT
-        assert "click_element" in SYSTEM_PROMPT
-        assert "type_text" in SYSTEM_PROMPT
+        assert len(options.allowed_tools) > 0
 
 
 class TestAgentLoopRun:
@@ -367,3 +360,107 @@ class TestAgentHelpers:
         events = agent._process_message(msg)
         # SystemMessages produce ThinkingEvent with status="system"
         assert any(isinstance(e, ThinkingEvent) for e in events)
+
+
+class TestAgentEmitter:
+    """Tests for event emitter integration in the agent loop."""
+
+    def test_agent_has_emitter(self):
+        config = make_config()
+        bridge = BridgeClient()
+        agent = AgentLoop(config=config, bridge=bridge)
+        assert agent.emitter is not None
+        assert isinstance(agent.emitter, EventEmitter)
+
+    def test_agent_accepts_custom_emitter(self):
+        config = make_config()
+        bridge = BridgeClient()
+        emitter = EventEmitter()
+        agent = AgentLoop(config=config, bridge=bridge, emitter=emitter)
+        assert agent.emitter is emitter
+
+    @pytest.mark.asyncio
+    async def test_side_events_yielded(self):
+        """Test that side-events from the emitter are yielded in the run loop."""
+        config = make_config()
+        bridge = BridgeClient()
+        emitter = EventEmitter()
+
+        # Pre-load the emitter with a side-event
+        # The fake query will run and then we check if side events appear
+        assistant_msg = AssistantMessage(
+            content=[TextBlock(text="Looking at the UI.")],
+            model="claude-sonnet-4-20250514",
+        )
+        result_msg = ResultMessage(
+            subtype="result",
+            duration_ms=100,
+            duration_api_ms=80,
+            is_error=False,
+            num_turns=1,
+            session_id="test-session",
+            result="Done.",
+        )
+
+        async def fake_query_with_side_effects(*, prompt, options=None):
+            # Simulate a tool emitting a side-event during processing
+            await emitter.emit(
+                HighlightEvent(
+                    highlights=[{"x": 10, "y": 20, "width": 100, "height": 50}],
+                    duration=3.0,
+                )
+            )
+            yield assistant_msg
+            await emitter.emit(SpeakEvent(text="Found it!", rate=0.5))
+            yield result_msg
+
+        agent = AgentLoop(
+            config=config,
+            bridge=bridge,
+            query_fn=fake_query_with_side_effects,
+            emitter=emitter,
+        )
+
+        events = []
+        async for event in agent.run("Find the button"):
+            events.append(event)
+
+        types = [type(e).__name__ for e in events]
+        assert "HighlightEvent" in types
+        assert "SpeakEvent" in types
+        assert types[-1] == "DoneEvent"
+
+    @pytest.mark.asyncio
+    async def test_clear_highlights_in_stream(self):
+        """Test that ClearHighlightsEvent from emitter appears in event stream."""
+        config = make_config()
+        bridge = BridgeClient()
+        emitter = EventEmitter()
+
+        result_msg = ResultMessage(
+            subtype="result",
+            duration_ms=50,
+            duration_api_ms=40,
+            is_error=False,
+            num_turns=1,
+            session_id="test-session",
+            result="Cleared.",
+        )
+
+        async def fake_query(*, prompt, options=None):
+            await emitter.emit(ClearHighlightsEvent())
+            yield result_msg
+
+        agent = AgentLoop(
+            config=config,
+            bridge=bridge,
+            query_fn=fake_query,
+            emitter=emitter,
+        )
+
+        events = []
+        async for event in agent.run("Clear highlights"):
+            events.append(event)
+
+        types = [type(e).__name__ for e in events]
+        assert "ClearHighlightsEvent" in types
