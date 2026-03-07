@@ -14,33 +14,57 @@ struct PyAxAssistantApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var _panelController: FloatingPanelController?
-    private var _appState: AppState?
-    private var _webSocket: WebSocketService?
-    private var _pythonBridge: PythonBridgeService?
+    private var _chatState: ChatState?
+    private var _voiceService: VoiceService?
+    private var _highlightWindow: HighlightOverlayWindow?
+    private var _agentProcess: AgentProcessService?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
         let configuration = BridgeConfiguration.default
-        let appState = AppState(configuration: configuration)
-        let webSocket = WebSocketService(configuration: configuration)
-        let pythonBridge = PythonBridgeService(configuration: configuration)
 
-        self._appState = appState
-        self._webSocket = webSocket
-        self._pythonBridge = pythonBridge
+        let agentProcess = AgentProcessService(configuration: configuration)
+        agentProcess.start()
+
+        let chatState = ChatState(configuration: configuration)
+        let voiceService = VoiceService()
+        let highlightWindow = HighlightOverlayWindow()
+
+        self._agentProcess = agentProcess
+        self._chatState = chatState
+        self._voiceService = voiceService
+        self._highlightWindow = highlightWindow
+
+        chatState.onHighlight = { [weak highlightWindow] rects, duration in
+            highlightWindow?.showHighlights(rects, duration: duration)
+        }
+
+        chatState.onClearHighlights = { [weak highlightWindow] in
+            highlightWindow?.clearHighlights()
+        }
+
+        chatState.onSpeak = { [weak voiceService] text, rate in
+            voiceService?.speak(text, rate: rate)
+        }
 
         let controller = FloatingPanelController()
         controller.show(content:
             ContentView()
-                .environment(appState)
-                .environment(webSocket)
-                .environment(pythonBridge)
+                .environment(chatState)
+                .environment(voiceService)
         )
         self._panelController = controller
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        false
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        _highlightWindow?.clearHighlights()
+        _highlightWindow?.close()
+        _voiceService?.stopSpeaking()
+        _agentProcess?.stop()
     }
 }

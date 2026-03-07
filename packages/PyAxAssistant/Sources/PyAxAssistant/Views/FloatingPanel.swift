@@ -25,9 +25,9 @@ final class FloatingPanel: NSPanel {
         // No titlebar, draggable by background
         isMovableByWindowBackground = true
 
-        // Don't steal focus
+        // Float above other windows but allow key status for text input
         isFloatingPanel = true
-        becomesKeyOnlyIfNeeded = true
+        becomesKeyOnlyIfNeeded = false
 
         // Translucent background
         isOpaque = false

@@ -2,24 +2,26 @@ import Foundation
 
 struct BridgeConfiguration: Sendable {
     let host: String
-    let port: UInt16
-    let pingInterval: Duration
-    let commandTimeout: Duration
-    let maxReconnectDelay: Duration
-    let maxMessages: Int
-    let gracefulShutdownTimeout: Duration
+    let agentPort: UInt16
+    let maxChatMessages: Int
+    let agentRequestTimeout: Duration
 
     static let `default` = BridgeConfiguration(
         host: "localhost",
-        port: 8765,
-        pingInterval: .seconds(15),
-        commandTimeout: .seconds(10),
-        maxReconnectDelay: .seconds(5),
-        maxMessages: 500,
-        gracefulShutdownTimeout: .seconds(2)
+        agentPort: 8766,
+        maxChatMessages: 200,
+        agentRequestTimeout: .seconds(120)
     )
 
-    var webSocketURL: URL {
-        URL(string: "ws://\(host):\(port)")!
+    var agentChatURL: URL {
+        URL(string: "http://\(host):\(agentPort)/chat")!
+    }
+
+    var agentStopURL: URL {
+        URL(string: "http://\(host):\(agentPort)/stop")!
+    }
+
+    var agentHealthURL: URL {
+        URL(string: "http://\(host):\(agentPort)/health")!
     }
 }

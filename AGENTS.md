@@ -95,22 +95,27 @@ Swift App ──POST /chat──▶ pyax-agent HTTP server (Starlette)
                     In-process MCP server (pyax-tools)
                               │
                               ▼
-                    Tool handlers call BridgeClient
+                    Tool handlers call BridgeClient / MemoryManager / EventEmitter
                               │
-                              ▼
-                    pyax bridge (ws://localhost:8765)
-                              │
-                              ▼
-                    macOS Accessibility APIs
+                    ┌─────────┼──────────┐
+                    ▼         ▼          ▼
+              pyax bridge   memory/    SSE stream
+             (ws://8765)    (disk)     (to Swift)
+                    │
+                    ▼
+              macOS Accessibility APIs
 ```
 
 Key design decisions:
 
 - **Claude Agent SDK** wraps the Claude Code CLI — no `ANTHROPIC_API_KEY` needed, uses `~/.claude` auth
 - **In-process MCP server** via `create_sdk_mcp_server()` — zero-overhead tool calls, no subprocess IPC
-- **Tool factory pattern with closures** — each tool file exports `create_<name>(bridge)` returning an `@tool`-decorated `SdkMcpTool`
+- **Tool factory pattern with closures** — each tool file exports `create_<name>(dependency)` returning an `@tool`-decorated `SdkMcpTool`
 - **SSE streaming** — the HTTP server streams thinking/tool_call/tool_result/message/done events to Swift
+- **EventEmitter** — Swift tools (highlight, speak) push SSE side-events via an async queue; the agent loop drains them
+- **Persistent memory** — three markdown files (SOUL.md, USER.md, WORKSPACE.md) injected into the system prompt
 - **Permission mode `bypassPermissions`** — our tools are safe accessibility read/write operations
+- **System prompt is behavioral only** — tool names/descriptions are injected automatically by MCP protocol
 
 ```
 pyax-agent/
@@ -120,23 +125,53 @@ pyax-agent/
     └── pyax_agent/
         ├── __init__.py                   — Version string
         ├── __main__.py                   — Uvicorn entry point
-        ├── config.py                     — AgentConfig dataclass (model, max_turns, bridge_url, permission_mode)
+        ├── config.py                     — AgentConfig dataclass (model, max_turns, bridge_url, memory_dir, permission_mode)
         ├── bridge_client.py              — Async WebSocket client to pyax bridge (ws://localhost:8765)
+        ├── event_emitter.py              — Async queue for tool-to-SSE side-events (highlights, speak)
+        ├── memory.py                     — MemoryManager: load/update SOUL.md, USER.md, WORKSPACE.md; build system prompt
         ├── agent.py                      — AgentLoop: wraps claude-agent-sdk query(), maps SDK messages to SSE events
         ├── server.py                     — Starlette HTTP server (POST /chat, POST /stop, GET /health)
         ├── models/
         │   ├── api.py                    — ChatRequest, ChatMessage, ErrorResponse dataclasses
         │   └── sse.py                    — 9 SSE event types + sse_serialize()
         └── tools/
-            ├── __init__.py               — Exports TOOL_NAMES, create_all_tools, create_mcp_server
-            ├── registry.py               — create_all_tools(bridge), create_mcp_server(bridge), TOOL_NAMES
+            ├── __init__.py               — Exports TOOL_NAMES, MEMORY_TOOL_NAMES, create_all_tools, create_mcp_server
+            ├── registry.py               — create_all_tools(bridge, emitter, memory_manager), TOOL_NAMES, MEMORY_TOOL_NAMES
             ├── get_ui_tree.py            — @tool: get accessibility tree of focused app
             ├── find_elements.py          — @tool: search elements by role/title/value with wildcards
             ├── get_element.py            — @tool: get element details by path
             ├── click_element.py          — @tool: AXPress on element by path or criteria
             ├── type_text.py              — @tool: focus element + set AXValue
-            └── get_focused_element.py    — @tool: get element with keyboard focus
+            ├── get_focused_element.py    — @tool: get element with keyboard focus
+            ├── scroll.py                 — @tool: scroll a scrollable area up or down
+            ├── perform_action.py         — @tool: any AX action (AXShowMenu, AXConfirm, etc.)
+            ├── get_element_at_position.py — @tool: hit-test at screen coordinates
+            ├── get_app_info.py           — @tool: focused app metadata (name, PID, windows, menu bar)
+            ├── list_windows.py           — @tool: list all windows with titles, sizes, positions
+            ├── highlight_elements.py     — @tool: emit HighlightEvent SSE side-event for Swift overlay
+            ├── clear_highlights.py       — @tool: emit ClearHighlightsEvent SSE side-event
+            ├── speak_text.py             — @tool: emit SpeakEvent SSE side-event for text-to-speech
+            ├── take_screenshot.py        — @tool: macOS screencapture → base64 image for Claude vision
+            ├── read_memory.py            — @tool: read a memory file (soul, user, workspace)
+            ├── update_memory.py          — @tool: update a section in user/workspace (soul is read-only)
+            └── save_workflow.py          — @tool: save a named multi-step workflow to WORKSPACE.md
 ```
+
+### Tool Categories
+
+Tools fall into four categories based on where they execute:
+
+**Bridge tools** (agent → pyax bridge → macOS AX APIs):
+`get_ui_tree`, `find_elements`, `get_element`, `click_element`, `type_text`, `get_focused_element`, `scroll`, `perform_action`, `get_element_at_position`, `get_app_info`, `list_windows`
+
+**Swift tools** (agent → SSE side-event → Swift renders):
+`highlight_elements`, `clear_highlights`, `speak_text`
+
+**Local tools** (run in agent process):
+`take_screenshot`
+
+**Memory tools** (agent → disk I/O, conditionally registered when `memory_dir` is set):
+`read_memory`, `update_memory`, `save_workflow`
 
 ### Tool Pattern
 
@@ -158,8 +193,8 @@ Tools are bundled into an in-process MCP server in `registry.py`:
 ```python
 from claude_agent_sdk import create_sdk_mcp_server
 
-def create_mcp_server(bridge):
-    tools = create_all_tools(bridge)
+def create_mcp_server(bridge, emitter=None, memory_manager=None):
+    tools = create_all_tools(bridge, emitter, memory_manager)
     return create_sdk_mcp_server(name="pyax-tools", version="0.1.0", tools=tools)
 ```
 
@@ -167,12 +202,34 @@ def create_mcp_server(bridge):
 
 `AgentLoop` in `agent.py` wraps the SDK's `query()` function:
 
-1. Builds `ClaudeAgentOptions` with system prompt, model, MCP server, allowed tools
+1. Builds `ClaudeAgentOptions` with system prompt (enriched with memory), model, MCP server, allowed tools
 2. Calls `query(prompt=message, options=options)` which yields SDK message types
 3. Maps `AssistantMessage` → `ToolCallEvent`/`MessageEvent`, `ResultMessage` → `MessageEvent`, etc.
-4. Strips `mcp__pyax-tools__` prefix from tool names for clean SSE output
+4. Drains side-events from the `EventEmitter` after each SDK message (highlights, speak)
+5. Strips `mcp__pyax-tools__` prefix from tool names for clean SSE output
 
 The `query_fn` parameter is injectable for testing (avoids spawning Claude Code CLI in tests).
+
+### Memory System
+
+Three persistent markdown files on disk, loaded into the system prompt at session start:
+
+| File           | Purpose                                                                       | Agent can write? |
+| -------------- | ----------------------------------------------------------------------------- | ---------------- |
+| `SOUL.md`      | Agent identity, personality, values, accessibility-first behavior             | No (read-only)   |
+| `USER.md`      | User profile: name, disabilities, input/output preferences, interaction style | Yes              |
+| `WORKSPACE.md` | Known apps, AX tree quirks, saved workflows, failed approaches                | Yes              |
+
+`MemoryManager` in `memory.py` handles:
+
+- `ensure_files()` — creates memory dir + default templates on first run
+- `load_all()` → `{"soul": "...", "user": "...", "workspace": "..."}`
+- `read_file(name)` — read a specific file
+- `update_section(name, section, content)` — replace a `## Section` in user/workspace
+- `append_to_section(name, section, content)` — append to a section (for adding workflows)
+- `build_system_prompt(base_prompt)` — concatenates base prompt + SOUL + USER + WORKSPACE
+
+Memory tools are **conditionally registered** — only when `config.memory_dir` is set. Without memory, the agent works exactly as before.
 
 ### SSE Events (Swift Frontend Protocol)
 
@@ -184,9 +241,9 @@ The `query_fn` parameter is injectable for testing (avoids spawning Claude Code 
 - `message` — text response from agent
 - `done` — stream complete
 - `error` — something went wrong
-- `highlight` — Swift should draw UI highlights (future)
-- `speak` — Swift should speak text aloud (future)
-- `clear_highlights` — Swift should remove highlights (future)
+- `highlight` — Swift should draw colored rectangles over UI elements
+- `speak` — Swift should speak text aloud via system TTS
+- `clear_highlights` — Swift should remove all highlight overlays
 
 ### HTTP Endpoints
 
@@ -196,22 +253,24 @@ The `query_fn` parameter is injectable for testing (avoids spawning Claude Code 
 
 ### Test Infrastructure
 
-124 tests in `tests/` (run with `.venv/bin/python -m pytest tests/ -v --tb=short`):
+241 tests in `tests/` (run with `.venv/bin/python -m pytest tests/ -v --tb=short`):
 
 - `test_config.py` — 13 tests: defaults, validation, env vars, permission mode
 - `test_bridge_client.py` — 10 tests: connection, commands, receive loop, ping
 - `test_models.py` — 42 tests: API models, all 9 SSE event types, serialization
-- `test_tools.py` — 30 tests: registry, MCP server, all 6 tools via FakeBridge + handler()
-- `test_agent.py` — 19 tests: init, options, all message types, error/cancel, helpers
+- `test_tools.py` — 85 tests: registry, MCP server, all 18 tools via FakeBridge + handler(), memory tool conditional registration
+- `test_agent.py` — 31 tests: init, options, all message types, error/cancel, helpers, emitter integration, memory integration
+- `test_memory.py` — 41 tests: MemoryManager init, read, update sections, append, build system prompt, default templates
 - `test_server.py` — 10 tests: health, stop, chat SSE streaming, validation
 
 Tests use a `FakeBridge` that captures commands and returns canned responses.
 Agent tests inject a `fake_query` async generator instead of calling the real SDK.
+Memory tests use `tmp_path` fixture for isolated filesystem operations.
 
 ## packages/PyAxAssistant — Swift macOS Companion App
 
-macOS floating overlay (NSPanel) that connects to the Python bridge via WebSocket.
-Displays accessibility event streams and exposes the bridge command interface.
+macOS floating overlay (NSPanel) that connects to the pyax-agent via HTTP+SSE.
+Provides a chat interface for the AI accessibility agent with highlight overlays and voice I/O.
 
 ```
 PyAxAssistant/
@@ -219,50 +278,48 @@ PyAxAssistant/
 ├── Sources/PyAxAssistant/
 │   ├── PyAxAssistantApp.swift             — App entry point, @Environment injection in AppDelegate
 │   ├── Models/
-│   │   ├── AppState.swift                 — @Observable state manager, owns all app state
-│   │   ├── BridgeConfiguration.swift      — Centralized config (ports, timeouts, limits)
-│   │   ├── BridgeError.swift              — Typed error enum
-│   │   ├── BridgeMessage.swift            — Typed enum for parsed WebSocket messages
-│   │   ├── BridgeResponse.swift           — Sendable response wrapper
-│   │   ├── BridgeStatus.swift             — Process lifecycle status enum
-│   │   ├── ConnectionStatus.swift         — WebSocket connection status enum
-│   │   └── RawMessage.swift               — Identifiable JSON message model
+│   │   ├── AgentEvent.swift               — Typed enum for 9 SSE event types + HighlightRect struct
+│   │   ├── BridgeConfiguration.swift      — Centralized config (agent port, timeouts)
+│   │   ├── ChatMessage.swift              — Chat message model + ChatRole + AgentStatus enums
+│   │   └── ChatState.swift                — @Observable chat state manager, handles SSE events
 │   ├── Services/
-│   │   ├── BridgeMessageParser.swift      — Stateless JSON parsing struct
-│   │   ├── PortManager.swift              — Orphan process cleanup utility
-│   │   ├── PythonBridgeService.swift      — Python process lifecycle + path resolution
-│   │   ├── WebSocketConnection.swift      — Connection lifecycle, reconnection, keep-alive
-│   │   └── WebSocketService.swift         — Command/response orchestrator, convenience API
+│   │   ├── AgentEventParser.swift         — Stateless SSE event parser (event type + JSON → AgentEvent)
+│   │   ├── AgentSSEClient.swift           — HTTP+SSE client to pyax-agent POST /chat
+│   │   └── VoiceService.swift             — TTS (AVSpeechSynthesizer) + STT (SFSpeechRecognizer)
 │   └── Views/
-│       ├── ContentView.swift              — Main composition, consumes @Environment
-│       ├── EventStreamView.swift          — Scrollable message list + empty state
+│       ├── ChatView.swift                 — Chat message list, text input, mic button, thinking indicator
+│       ├── ContentView.swift              — Main composition (status bar + chat view)
 │       ├── FloatingPanel.swift            — NSPanel subclass + controller
-│       └── StatusBarView.swift            — Status bar with connection indicator + controls
+│       ├── HighlightOverlayWindow.swift   — Click-through full-screen overlay for colored rectangles
+│       └── StatusBarView.swift            — Status bar with app title + clear button
 └── Tests/PyAxAssistantTests/
-    ├── AppStateTests.swift
-    ├── BridgeConfigurationTests.swift
-    ├── BridgeMessageParserTests.swift
-    ├── BridgeResponseTests.swift
-    └── BridgeStatusTests.swift
+    ├── AgentEventParserTests.swift         — 20 tests: all 9 event types, edge cases
+    ├── BridgeConfigurationTests.swift      — 3 tests: defaults, URLs, custom config
+    ├── ChatMessageTests.swift              — 17 tests: roles, equality, AgentStatus, HighlightRect
+    └── ChatStateTests.swift                — 7 tests: initial state, clear, delegates, guards
 ```
 
 ### How the Three Packages Connect
 
 ```
 ┌─────────────────┐    POST /chat (SSE)    ┌──────────────┐    WebSocket     ┌─────────────┐
-│  PyAxAssistant  │ ◀───────────────────▶  │  pyax-agent  │ ◀─────────────▶ │  pyax bridge │
+│  PyAxAssistant  │ ──────────────────────▶ │  pyax-agent  │ ◀─────────────▶ │  pyax bridge │
 │  (Swift app)    │    port 8766           │  (AI agent)  │   port 8765     │  (Python)    │
 └─────────────────┘                        └──────────────┘                 └─────────────┘
                                                   │                               │
-                                                  ▼                               ▼
-                                           Claude Code CLI              macOS Accessibility APIs
-                                           (claude-agent-sdk)           (AXUIElement via pyobjc)
+                                            ┌─────┴─────┐                        ▼
+                                            ▼           ▼                macOS Accessibility APIs
+                                     Claude Code    memory/              (AXUIElement via pyobjc)
+                                     CLI (SDK)      SOUL.md
+                                                    USER.md
+                                                    WORKSPACE.md
 ```
 
-1. `PyAxAssistant` spawns `python3 -m pyax.bridge` as a child process (`PythonBridgeService`)
-2. After a 2-second startup delay, it connects via WebSocket to `ws://localhost:8765` (`WebSocketService`)
-3. The bridge streams accessibility events as JSON; PyAxAssistant displays them in `EventStreamView`
-4. User chat messages go to `pyax-agent` via `POST /chat` on port 8766
-5. The agent uses Claude Agent SDK to reason about the UI and call tools (get_ui_tree, click_element, etc.)
-6. Tool calls go through BridgeClient → pyax bridge → macOS AX APIs
+1. User chat messages go from `PyAxAssistant` to `pyax-agent` via `POST /chat` on port 8766
+2. The agent loads memory files (SOUL.md + USER.md + WORKSPACE.md) into the system prompt
+3. The agent uses Claude Agent SDK to reason about the UI and call tools
+4. Tool calls go through BridgeClient → pyax bridge (ws://8765) → macOS AX APIs
+5. Swift tools emit SSE side-events (highlight, speak) via the EventEmitter
+6. Memory tools read/update persistent markdown files on disk
 7. Agent responses stream back as SSE events (thinking, tool_call, tool_result, message, done)
+8. PyAxAssistant renders highlights, speaks text, and displays chat messages in real-time

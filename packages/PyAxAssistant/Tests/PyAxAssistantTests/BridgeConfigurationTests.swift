@@ -10,36 +10,32 @@ struct BridgeConfigurationTests {
         let sut = BridgeConfiguration.default
 
         #expect(sut.host == "localhost")
-        #expect(sut.port == 8765)
-        #expect(sut.pingInterval == .seconds(15))
-        #expect(sut.commandTimeout == .seconds(10))
-        #expect(sut.maxReconnectDelay == .seconds(5))
-        #expect(sut.maxMessages == 500)
-        #expect(sut.gracefulShutdownTimeout == .seconds(2))
+        #expect(sut.agentPort == 8766)
+        #expect(sut.maxChatMessages == 200)
+        #expect(sut.agentRequestTimeout == .seconds(120))
     }
 
-    @Test("WebSocket URL is constructed correctly")
-    func webSocketURL() {
+    @Test("Agent URLs are constructed correctly")
+    func agentURLs() {
         let sut = BridgeConfiguration.default
 
-        #expect(sut.webSocketURL.absoluteString == "ws://localhost:8765")
+        #expect(sut.agentChatURL.absoluteString == "http://localhost:8766/chat")
+        #expect(sut.agentStopURL.absoluteString == "http://localhost:8766/stop")
+        #expect(sut.agentHealthURL.absoluteString == "http://localhost:8766/health")
     }
 
     @Test("Custom configuration preserves values")
     func customConfiguration() {
         let sut = BridgeConfiguration(
             host: "192.168.1.100",
-            port: 9999,
-            pingInterval: .seconds(30),
-            commandTimeout: .seconds(20),
-            maxReconnectDelay: .seconds(10),
-            maxMessages: 1000,
-            gracefulShutdownTimeout: .seconds(5)
+            agentPort: 9998,
+            maxChatMessages: 50,
+            agentRequestTimeout: .seconds(60)
         )
 
         #expect(sut.host == "192.168.1.100")
-        #expect(sut.port == 9999)
-        #expect(sut.maxMessages == 1000)
-        #expect(sut.webSocketURL.absoluteString == "ws://192.168.1.100:9999")
+        #expect(sut.agentPort == 9998)
+        #expect(sut.maxChatMessages == 50)
+        #expect(sut.agentChatURL.absoluteString == "http://192.168.1.100:9998/chat")
     }
 }
