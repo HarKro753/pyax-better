@@ -5,6 +5,9 @@ dist
 .venv
 venv
 
+reference
+
+
 # Xcode
 PyAxAssistant/.build/
 PyAxAssistant/DerivedData/

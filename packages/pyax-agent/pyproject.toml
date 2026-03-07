@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pyax-agent"
+version = "0.1.0"
+description = "AI-powered accessibility agent for pyax"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "anthropic>=0.84.0",
+    "starlette>=0.41.0",
+    "uvicorn[standard]>=0.32.0",
+    "websockets>=12.0",
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0",
+    "ruff>=0.8.0",
+]
+
+[project.scripts]
+pyax-agent = "pyax_agent.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pyax_agent"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "T20", "RET", "PTH"]
