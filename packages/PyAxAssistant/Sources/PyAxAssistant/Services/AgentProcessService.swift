@@ -1,22 +1,22 @@
 import Foundation
 
-/// Manages the pyax-agent Python process lifecycle.
+/// Manages the pyax bridge and pyax-agent Python process lifecycles.
 ///
-/// Launches `python -m pyax_agent` as a child process on startup,
-/// monitors its health, and restarts if needed.
+/// Launches both `python -m pyax.bridge` (WebSocket on port 8765) and
+/// `python -m pyax_agent` (HTTP on port 8766) as child processes on startup.
 @Observable
 @MainActor
 final class AgentProcessService {
 
     // MARK: - Private State
 
-    private var _process: Process?
-    private var _outputPipe: Pipe?
-    private var _errorPipe: Pipe?
+    private var _bridgeProcess: Process?
+    private var _agentProcess: Process?
+    private var _bridgePipes: (out: Pipe, err: Pipe)?
+    private var _agentPipes: (out: Pipe, err: Pipe)?
     private var _isRunning = false
     private let _configuration: BridgeConfiguration
-    private let _pythonPath: String
-    private let _agentSourcePath: String
+    private let _repoRoot: String
 
     // MARK: - Read Access
 
@@ -26,88 +26,162 @@ final class AgentProcessService {
 
     init(configuration: BridgeConfiguration = .default) {
         self._configuration = configuration
-        self._pythonPath = Self.findAgentPython()
-        self._agentSourcePath = Self.findAgentSourcePath()
-        print("[AgentProcess] Python: \(_pythonPath)")
-        print("[AgentProcess] Agent source: \(_agentSourcePath)")
+        self._repoRoot = Self.findRepoRoot()
+        print("[Startup] Repo root: \(_repoRoot)")
     }
 
     // MARK: - Lifecycle
 
     func start() {
         guard !_isRunning else {
-            print("[AgentProcess] Already running")
+            print("[Startup] Already running")
             return
         }
 
-        killExistingProcess(port: _configuration.agentPort)
+        startBridge()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.startAgent()
+            self?._isRunning = true
+        }
+    }
+
+    func stop() {
+        print("[Startup] Stopping all processes...")
+        stopProcess(_agentProcess, label: "pyax-agent")
+        stopProcess(_bridgeProcess, label: "pyax-bridge")
+        cleanupPipes(_agentPipes)
+        cleanupPipes(_bridgePipes)
+        _agentProcess = nil
+        _bridgeProcess = nil
+        _agentPipes = nil
+        _bridgePipes = nil
+        _isRunning = false
+    }
+
+    // MARK: - Bridge
+
+    private func startBridge() {
+        killExistingProcess(port: 8765, label: "bridge")
+
+        let pythonPath = findPython(venvSubpath: "packages/pyax-agent/.venv/bin/python")
+        let pyaxSrc = _repoRoot + "/packages/pyax/src"
+
+        print("[pyax-bridge] Starting with Python: \(pythonPath)")
 
         let process = Process()
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
+        let pipes = makePipes(label: "pyax-bridge")
 
-        process.executableURL = URL(fileURLWithPath: _pythonPath)
-        process.arguments = ["-m", "pyax_agent"]
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
-        process.environment = buildEnvironment()
+        process.executableURL = URL(fileURLWithPath: pythonPath)
+        process.arguments = ["-m", "pyax.bridge"]
+        process.standardOutput = pipes.out
+        process.standardError = pipes.err
 
-        outputPipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if !data.isEmpty, let text = String(data: data, encoding: .utf8) {
-                for line in text.split(separator: "\n") {
-                    print("[pyax-agent] \(line)")
-                }
-            }
-        }
+        var env = ProcessInfo.processInfo.environment
+        var pythonPaths = [pyaxSrc]
+        if let existing = env["PYTHONPATH"] { pythonPaths.append(existing) }
+        env["PYTHONPATH"] = pythonPaths.joined(separator: ":")
+        process.environment = env
 
-        errorPipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if !data.isEmpty, let text = String(data: data, encoding: .utf8) {
-                for line in text.split(separator: "\n") {
-                    print("[pyax-agent] \(line)")
-                }
-            }
-        }
-
-        process.terminationHandler = { [weak self] terminatedProcess in
+        process.terminationHandler = { proc in
             Task { @MainActor in
-                guard let self else { return }
-                self._isRunning = false
-                if terminatedProcess.terminationStatus != 0 {
-                    print("[AgentProcess] Exited with code \(terminatedProcess.terminationStatus)")
-                } else {
-                    print("[AgentProcess] Stopped")
-                }
+                print("[pyax-bridge] Exited (code \(proc.terminationStatus))")
             }
         }
 
         do {
             try process.run()
-            self._process = process
-            self._outputPipe = outputPipe
-            self._errorPipe = errorPipe
-            _isRunning = true
-            print("[AgentProcess] Started (PID \(process.processIdentifier))")
+            _bridgeProcess = process
+            _bridgePipes = pipes
+            print("[pyax-bridge] Started (PID \(process.processIdentifier))")
         } catch {
-            print("[AgentProcess] ERROR: Failed to start: \(error.localizedDescription)")
+            print("[pyax-bridge] ERROR: Failed to start: \(error.localizedDescription)")
         }
     }
 
-    func stop() {
-        guard let process = _process, process.isRunning else {
-            _isRunning = false
-            return
+    // MARK: - Agent
+
+    private func startAgent() {
+        killExistingProcess(port: _configuration.agentPort, label: "agent")
+
+        let pythonPath = findPython(venvSubpath: "packages/pyax-agent/.venv/bin/python")
+        let agentSrc = _repoRoot + "/packages/pyax-agent/src"
+        let pyaxSrc = _repoRoot + "/packages/pyax/src"
+
+        print("[pyax-agent] Starting with Python: \(pythonPath)")
+
+        let process = Process()
+        let pipes = makePipes(label: "pyax-agent")
+
+        process.executableURL = URL(fileURLWithPath: pythonPath)
+        process.arguments = ["-m", "pyax_agent"]
+        process.standardOutput = pipes.out
+        process.standardError = pipes.err
+
+        var env = ProcessInfo.processInfo.environment
+        var pythonPaths = [agentSrc, pyaxSrc]
+        if let existing = env["PYTHONPATH"] { pythonPaths.append(existing) }
+        env["PYTHONPATH"] = pythonPaths.joined(separator: ":")
+        process.environment = env
+
+        process.terminationHandler = { proc in
+            Task { @MainActor in
+                print("[pyax-agent] Exited (code \(proc.terminationStatus))")
+            }
         }
 
-        print("[AgentProcess] Stopping...")
+        do {
+            try process.run()
+            _agentProcess = process
+            _agentPipes = pipes
+            print("[pyax-agent] Started (PID \(process.processIdentifier))")
+        } catch {
+            print("[pyax-agent] ERROR: Failed to start: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Helpers
+
+    private func makePipes(label: String) -> (out: Pipe, err: Pipe) {
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+
+        outPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if !data.isEmpty, let text = String(data: data, encoding: .utf8) {
+                for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        print("[\(label)] \(trimmed)")
+                    }
+                }
+            }
+        }
+
+        errPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if !data.isEmpty, let text = String(data: data, encoding: .utf8) {
+                for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        print("[\(label)] \(trimmed)")
+                    }
+                }
+            }
+        }
+
+        return (outPipe, errPipe)
+    }
+
+    private func stopProcess(_ process: Process?, label: String) {
+        guard let process, process.isRunning else { return }
+        print("[\(label)] Stopping (PID \(process.processIdentifier))...")
         process.terminate()
-        cleanupPipes()
 
         let capturedProcess = process
         DispatchQueue.global().async {
             for _ in 0..<20 {
-                if !capturedProcess.isRunning { break }
+                if !capturedProcess.isRunning { return }
                 usleep(100_000)
             }
             if capturedProcess.isRunning {
@@ -117,25 +191,15 @@ final class AgentProcessService {
                     kill(capturedProcess.processIdentifier, SIGKILL)
                 }
             }
-            Task { @MainActor in
-                print("[AgentProcess] Stopped")
-            }
         }
-
-        _process = nil
-        _isRunning = false
     }
 
-    // MARK: - Private
-
-    private func cleanupPipes() {
-        _outputPipe?.fileHandleForReading.readabilityHandler = nil
-        _errorPipe?.fileHandleForReading.readabilityHandler = nil
-        _outputPipe = nil
-        _errorPipe = nil
+    private func cleanupPipes(_ pipes: (out: Pipe, err: Pipe)?) {
+        pipes?.out.fileHandleForReading.readabilityHandler = nil
+        pipes?.err.fileHandleForReading.readabilityHandler = nil
     }
 
-    private func killExistingProcess(port: UInt16) {
+    private func killExistingProcess(port: UInt16, label: String) {
         let lsof = Process()
         let pipe = Pipe()
         lsof.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
@@ -161,45 +225,22 @@ final class AgentProcessService {
             .compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
 
         for pid in pids where pid != myPID {
-            print("[AgentProcess] Killing existing process on port \(port): PID \(pid)")
+            print("[Startup] Killing existing \(label) on port \(port): PID \(pid)")
             kill(pid, SIGTERM)
         }
         usleep(500_000)
     }
 
-    private func buildEnvironment() -> [String: String] {
-        var env = ProcessInfo.processInfo.environment
-
-        if !_agentSourcePath.isEmpty {
-            var pythonPaths = [_agentSourcePath]
-
-            let pyaxSourcePath = Self.findPyaxSourcePath()
-            if !pyaxSourcePath.isEmpty {
-                pythonPaths.append(pyaxSourcePath)
-            }
-
-            if let existing = env["PYTHONPATH"] {
-                pythonPaths.append(existing)
-            }
-            env["PYTHONPATH"] = pythonPaths.joined(separator: ":")
-        }
-
-        return env
-    }
-
-    // MARK: - Path Resolution
-
-    private static func findAgentPython() -> String {
-        let agentVenv = findRepoRoot() + "/packages/pyax-agent/.venv/bin/python"
-        if FileManager.default.isExecutableFile(atPath: agentVenv) {
-            return agentVenv
+    private func findPython(venvSubpath: String) -> String {
+        let venvPath = _repoRoot + "/" + venvSubpath
+        if FileManager.default.isExecutableFile(atPath: venvPath) {
+            return venvPath
         }
 
         let candidates = [
             "/usr/bin/python3",
             "/usr/local/bin/python3",
             "/opt/homebrew/bin/python3",
-            "\(NSHomeDirectory())/.pyenv/shims/python3",
         ]
         for candidate in candidates {
             if FileManager.default.isExecutableFile(atPath: candidate) {
@@ -209,23 +250,7 @@ final class AgentProcessService {
         return "/usr/bin/python3"
     }
 
-    private static func findAgentSourcePath() -> String {
-        let root = findRepoRoot()
-        let candidate = root + "/packages/pyax-agent/src"
-        if FileManager.default.fileExists(atPath: candidate) {
-            return candidate
-        }
-        return ""
-    }
-
-    private static func findPyaxSourcePath() -> String {
-        let root = findRepoRoot()
-        let candidate = root + "/packages/pyax/src"
-        if FileManager.default.fileExists(atPath: candidate) {
-            return candidate
-        }
-        return ""
-    }
+    // MARK: - Path Resolution
 
     private static func findRepoRoot() -> String {
         let executablePath = Bundle.main.executablePath ?? ""

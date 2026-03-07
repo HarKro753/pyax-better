@@ -130,13 +130,31 @@ def create_app(
     if server is None:
         server = AgentServer(config=config)
 
+    async def on_startup() -> None:
+        """Connect to the pyax bridge on server startup."""
+        try:
+            await server.bridge.connect()
+            logger.info("Connected to pyax bridge at %s", server.bridge.url)
+        except Exception as e:
+            logger.warning("Could not connect to bridge: %s (tools will fail)", e)
+
+    async def on_shutdown() -> None:
+        """Disconnect from the pyax bridge on server shutdown."""
+        if server.bridge.connected:
+            await server.bridge.disconnect()
+            logger.info("Disconnected from pyax bridge")
+
     routes = [
         Route("/chat", server.chat, methods=["POST"]),
         Route("/stop", server.stop, methods=["POST"]),
         Route("/health", server.health, methods=["GET"]),
     ]
 
-    return Starlette(routes=routes)
+    return Starlette(
+        routes=routes,
+        on_startup=[on_startup],
+        on_shutdown=[on_shutdown],
+    )
 
 
 # Default app instance for uvicorn

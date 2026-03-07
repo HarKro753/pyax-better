@@ -41,7 +41,7 @@ final class ChatState {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !_isProcessing else { return }
 
-        print("[Chat] Sending: \(trimmed.prefix(80))")
+        print("[Chat] → \(trimmed)")
 
         let userMessage = ChatMessage(role: .user, content: trimmed)
         _messages.append(userMessage)
@@ -51,7 +51,15 @@ final class ChatState {
         _currentAssistantContent = ""
 
         Task {
-            let healthy = await _client.checkHealth()
+            var healthy = false
+            for attempt in 1...3 {
+                healthy = await _client.checkHealth()
+                if healthy { break }
+                if attempt < 3 {
+                    print("[Chat] Agent not ready, retrying in 2s (attempt \(attempt)/3)...")
+                    try? await Task.sleep(for: .seconds(2))
+                }
+            }
             if !healthy {
                 let msg = "Agent server is not running. Start pyax-agent on port \(_configuration.agentPort) first."
                 print("[Chat] ERROR: \(msg)")
@@ -87,7 +95,6 @@ final class ChatState {
 
     /// Clear all messages and start a new conversation.
     func clearConversation() {
-        print("[Chat] Clearing conversation")
         _messages.removeAll()
         _conversationId = UUID().uuidString
         _agentStatus = .idle
@@ -110,11 +117,9 @@ final class ChatState {
     private func handleEvent(_ event: AgentEvent) {
         switch event {
         case .thinking(let status):
-            print("[Chat] Thinking: \(status)")
             _agentStatus = .thinking(status: status)
 
         case .toolCall(let tool, let inputJSON):
-            print("[Chat] Tool call: \(tool)")
             _agentStatus = .callingTool(tool: tool)
             let toolMessage = ChatMessage(
                 role: .toolCall(tool: tool),
@@ -123,7 +128,6 @@ final class ChatState {
             _messages.append(toolMessage)
 
         case .toolResult(let tool, let resultJSON):
-            print("[Chat] Tool result: \(tool)")
             let resultMessage = ChatMessage(
                 role: .toolResult(tool: tool),
                 content: resultJSON
@@ -131,28 +135,23 @@ final class ChatState {
             _messages.append(resultMessage)
 
         case .message(let content):
-            print("[Chat] Message: \(content.prefix(80))")
             appendOrUpdateAssistantMessage(content)
 
         case .done:
-            print("[Chat] Done")
+            break
 
         case .error(let message):
-            print("[Chat] ERROR: \(message)")
             _agentStatus = .error(message: message)
             let errorMessage = ChatMessage(role: .error, content: message)
             _messages.append(errorMessage)
 
         case .highlight(let rects, let duration):
-            print("[Chat] Highlight \(rects.count) rects for \(duration)s")
             onHighlight?(rects, duration)
 
         case .speak(let text, let rate):
-            print("[Chat] Speak: \(text.prefix(80)) (rate: \(rate))")
             onSpeak?(text, rate)
 
         case .clearHighlights:
-            print("[Chat] Clear highlights")
             onClearHighlights?()
         }
 
