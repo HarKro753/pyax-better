@@ -7,8 +7,14 @@ import pytest
 from claude_agent_sdk import SdkMcpTool
 
 from pyax_agent.event_emitter import EventEmitter
+from pyax_agent.memory import MemoryManager
 from pyax_agent.models.sse import ClearHighlightsEvent, HighlightEvent, SpeakEvent
-from pyax_agent.tools.registry import TOOL_NAMES, create_all_tools, create_mcp_server
+from pyax_agent.tools.registry import (
+    MEMORY_TOOL_NAMES,
+    TOOL_NAMES,
+    create_all_tools,
+    create_mcp_server,
+)
 from pyax_agent.tools.get_ui_tree import create_get_ui_tree
 from pyax_agent.tools.find_elements import create_find_elements
 from pyax_agent.tools.get_element import create_get_element
@@ -24,6 +30,9 @@ from pyax_agent.tools.highlight_elements import create_highlight_elements
 from pyax_agent.tools.clear_highlights import create_clear_highlights
 from pyax_agent.tools.speak_text import create_speak_text
 from pyax_agent.tools.take_screenshot import create_take_screenshot
+from pyax_agent.tools.read_memory import create_read_memory
+from pyax_agent.tools.update_memory import create_update_memory
+from pyax_agent.tools.save_workflow import create_save_workflow
 
 
 class FakeBridge:
@@ -792,3 +801,320 @@ class TestTakeScreenshot:
         data = json.loads(result["content"][0]["text"])
         assert "error" in data
         assert "timed out" in data["error"]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Phase 3 tests — Memory tools
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestRegistryWithMemory:
+    """Tests for registry with memory tools enabled."""
+
+    def test_memory_tools_added_when_manager_provided(self, tmp_path):
+        bridge = FakeBridge()
+        mm = MemoryManager(str(tmp_path))
+        mm.ensure_files()
+        tools = create_all_tools(bridge, memory_manager=mm)
+        names = {t.name for t in tools}
+        assert "read_memory" in names
+        assert "update_memory" in names
+        assert "save_workflow" in names
+
+    def test_memory_tools_not_added_without_manager(self):
+        bridge = FakeBridge()
+        tools = create_all_tools(bridge)
+        names = {t.name for t in tools}
+        assert "read_memory" not in names
+        assert "update_memory" not in names
+        assert "save_workflow" not in names
+
+    def test_all_tools_with_memory(self, tmp_path):
+        """TOOL_NAMES + MEMORY_TOOL_NAMES should match tools created with memory."""
+        bridge = FakeBridge()
+        mm = MemoryManager(str(tmp_path))
+        mm.ensure_files()
+        tools = create_all_tools(bridge, memory_manager=mm)
+        names = {t.name for t in tools}
+        expected = set(TOOL_NAMES) | set(MEMORY_TOOL_NAMES)
+        assert names == expected
+
+    def test_memory_tool_names_constant(self):
+        assert MEMORY_TOOL_NAMES == ["read_memory", "update_memory", "save_workflow"]
+
+    def test_create_mcp_server_with_memory(self, tmp_path):
+        bridge = FakeBridge()
+        mm = MemoryManager(str(tmp_path))
+        mm.ensure_files()
+        server_config = create_mcp_server(bridge, memory_manager=mm)
+        assert server_config is not None
+
+
+class TestReadMemory:
+    """Tests for read_memory tool."""
+
+    @pytest.mark.asyncio
+    async def test_read_soul(self, tmp_path):
+        mm = MemoryManager(str(tmp_path))
+        mm.ensure_files()
+        tool = create_read_memory(mm)
+        result = _extract_json(await tool.handler({"name": "soul"}))
+        assert result["name"] == "soul"
+        assert "# Soul" in result["content"]
+
+    @pytest.mark.asyncio
+    async def test_read_user(self, tmp_path):
+        mm = MemoryManager(str(tmp_path))
+        mm.ensure_files()
+        tool = create_read_memory(mm)
+        result = _extract_json(await tool.handler({"name": "user"}))
+        assert result["name"] == "user"
+        assert "# User" in result["content"]
+
+    @pytest.mark.asyncio
+    async def test_read_workspace(self, tmp_path):
+        mm = MemoryManager(str(tmp_path))
+        mm.ensure_files()
+        tool = create_read_memory(mm)
+        result = _extract_json(await tool.handler({"name": "workspace"}))
+        assert result["name"] == "workspace"
+        assert "# Workspace" in result["content"]
+
+    @pytest.mark.asyncio
+    async def test_read_invalid_name(self, tmp_path):
+        mm = MemoryManager(str(tmp_path))
+        tool = create_read_memory(mm)
+        result = _extract_json(await tool.handler({"name": "invalid"}))
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_read_empty_name(self, tmp_path):
+        mm = MemoryManager(str(tmp_path))
+        tool = create_read_memory(mm)
+        result = _extract_json(await tool.handler({"name": ""}))
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_read_nonexistent_file(self, tmp_path):
+        mm = MemoryManager(str(tmp_path))
+        # Don't ensure files — they don't exist
+        tool = create_read_memory(mm)
+        result = _extract_json(await tool.handler({"name": "soul"}))
+        assert result["content"] == ""
+        assert "note" in result
+
+    @pytest.mark.asyncio
+    async def test_tool_metadata(self, tmp_path):
+        mm = MemoryManager(str(tmp_path))
+        tool = create_read_memory(mm)
+        assert tool.name == "read_memory"
+        assert tool.description
+        assert isinstance(tool.input_schema, dict)
+
+
+class TestUpdateMemory:
+    """Tests for update_memory tool."""
+
+    @pytest.mark.asyncio
+    async def test_update_user(self, tmp_path):
+        mm = MemoryManager(str(tmp_path))
+        mm.ensure_files()
+        tool = create_update_memory(mm)
+        result = _extract_json(
+            await tool.handler(
+                {
+                    "name": "user",
+                    "section": "## Profile",
+                    "content": "Name: Alice",
+                }
+            )
+        )
+        assert result["success"] is True
+        assert result["file"] == "user"
+        assert result["section"] == "## Profile"
+        # Verify content was written
+        content = mm.read_file("user")
+        assert "Name: Alice" in content
+
+    @pytest.mark.asyncio
+    async def test_update_workspace(self, tmp_path):
+        mm = MemoryManager(str(tmp_path))
+        mm.ensure_files()
+        tool = create_update_memory(mm)
+        result = _extract_json(
+            await tool.handler(
+                {
+                    "name": "workspace",
+                    "section": "## Apps",
+                    "content": "Safari, Finder",
+                }
+            )
+        )
+        assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_update_soul_rejected(self, tmp_path):
+        mm = MemoryManager(str(tmp_path))
+        mm.ensure_files()
+        tool = create_update_memory(mm)
+        result = _extract_json(
+            await tool.handler(
+                {
+                    "name": "soul",
+                    "section": "## Mission",
+                    "content": "New mission",
+                }
+            )
+        )
+        assert "error" in result
+        assert "read-only" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_update_invalid_name(self, tmp_path):
+        mm = MemoryManager(str(tmp_path))
+        tool = create_update_memory(mm)
+        result = _extract_json(
+            await tool.handler(
+                {
+                    "name": "invalid",
+                    "section": "## Profile",
+                    "content": "test",
+                }
+            )
+        )
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_update_missing_section(self, tmp_path):
+        mm = MemoryManager(str(tmp_path))
+        mm.ensure_files()
+        tool = create_update_memory(mm)
+        result = _extract_json(
+            await tool.handler(
+                {
+                    "name": "user",
+                    "section": "",
+                    "content": "test",
+                }
+            )
+        )
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_update_missing_content(self, tmp_path):
+        mm = MemoryManager(str(tmp_path))
+        mm.ensure_files()
+        tool = create_update_memory(mm)
+        result = _extract_json(
+            await tool.handler(
+                {
+                    "name": "user",
+                    "section": "## Profile",
+                    "content": "",
+                }
+            )
+        )
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_tool_metadata(self, tmp_path):
+        mm = MemoryManager(str(tmp_path))
+        tool = create_update_memory(mm)
+        assert tool.name == "update_memory"
+        assert tool.description
+        assert isinstance(tool.input_schema, dict)
+
+
+class TestSaveWorkflow:
+    """Tests for save_workflow tool."""
+
+    @pytest.mark.asyncio
+    async def test_save_workflow(self, tmp_path):
+        mm = MemoryManager(str(tmp_path))
+        mm.ensure_files()
+        tool = create_save_workflow(mm)
+        result = _extract_json(
+            await tool.handler(
+                {
+                    "name": "Check Email",
+                    "steps": ["Open Mail app", "Click Inbox", "Read first message"],
+                }
+            )
+        )
+        assert result["success"] is True
+        assert result["workflow"] == "Check Email"
+        assert result["step_count"] == 3
+
+    @pytest.mark.asyncio
+    async def test_workflow_stored_in_workspace(self, tmp_path):
+        mm = MemoryManager(str(tmp_path))
+        mm.ensure_files()
+        tool = create_save_workflow(mm)
+        await tool.handler(
+            {
+                "name": "Check Email",
+                "steps": ["Open Mail", "Click Inbox"],
+            }
+        )
+        content = mm.read_file("workspace")
+        assert "## Saved Workflows" in content
+        assert "### Check Email" in content
+        assert "1. Open Mail" in content
+        assert "2. Click Inbox" in content
+
+    @pytest.mark.asyncio
+    async def test_save_multiple_workflows(self, tmp_path):
+        mm = MemoryManager(str(tmp_path))
+        mm.ensure_files()
+        tool = create_save_workflow(mm)
+        await tool.handler({"name": "Check Email", "steps": ["Open Mail"]})
+        await tool.handler({"name": "Read News", "steps": ["Open Safari"]})
+        content = mm.read_file("workspace")
+        assert "### Check Email" in content
+        assert "### Read News" in content
+
+    @pytest.mark.asyncio
+    async def test_empty_name(self, tmp_path):
+        mm = MemoryManager(str(tmp_path))
+        mm.ensure_files()
+        tool = create_save_workflow(mm)
+        result = _extract_json(
+            await tool.handler(
+                {
+                    "name": "",
+                    "steps": ["step1"],
+                }
+            )
+        )
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_empty_steps(self, tmp_path):
+        mm = MemoryManager(str(tmp_path))
+        mm.ensure_files()
+        tool = create_save_workflow(mm)
+        result = _extract_json(
+            await tool.handler(
+                {
+                    "name": "Test",
+                    "steps": [],
+                }
+            )
+        )
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_missing_steps(self, tmp_path):
+        mm = MemoryManager(str(tmp_path))
+        mm.ensure_files()
+        tool = create_save_workflow(mm)
+        result = _extract_json(await tool.handler({"name": "Test"}))
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_tool_metadata(self, tmp_path):
+        mm = MemoryManager(str(tmp_path))
+        tool = create_save_workflow(mm)
+        assert tool.name == "save_workflow"
+        assert tool.description
+        assert isinstance(tool.input_schema, dict)

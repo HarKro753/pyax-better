@@ -21,6 +21,7 @@ from starlette.routing import Route
 from pyax_agent.agent import AgentLoop
 from pyax_agent.bridge_client import BridgeClient
 from pyax_agent.config import AgentConfig, get_config
+from pyax_agent.memory import MemoryManager
 from pyax_agent.models.api import ChatRequest, ErrorResponse
 from pyax_agent.models.sse import DoneEvent, ErrorEvent, sse_serialize
 
@@ -40,11 +41,21 @@ class AgentServer:
         self._start_time = time.time()
         self._conversation_history: dict[str, list[dict[str, Any]]] = {}
 
+        # Create memory manager if memory_dir is configured
+        self._memory_manager: MemoryManager | None = None
+        if self.config.memory_dir:
+            self._memory_manager = MemoryManager(self.config.memory_dir)
+            self._memory_manager.ensure_files()
+
     @property
     def agent(self) -> AgentLoop:
         """Lazy-initialize the agent loop."""
         if self._agent is None:
-            self._agent = AgentLoop(config=self.config, bridge=self.bridge)
+            self._agent = AgentLoop(
+                config=self.config,
+                bridge=self.bridge,
+                memory_manager=self._memory_manager,
+            )
         return self._agent
 
     async def chat(self, request: Request) -> StreamingResponse | JSONResponse:

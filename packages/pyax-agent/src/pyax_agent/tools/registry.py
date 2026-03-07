@@ -38,9 +38,15 @@ from pyax_agent.tools.speak_text import create_speak_text
 # Phase 2 local tool
 from pyax_agent.tools.take_screenshot import create_take_screenshot
 
+# Phase 3 memory tools
+from pyax_agent.tools.read_memory import create_read_memory
+from pyax_agent.tools.update_memory import create_update_memory
+from pyax_agent.tools.save_workflow import create_save_workflow
+
 if TYPE_CHECKING:
     from pyax_agent.bridge_client import BridgeClient
     from pyax_agent.event_emitter import EventEmitter
+    from pyax_agent.memory import MemoryManager
 
 
 # Names of all tools (for tests and introspection)
@@ -66,10 +72,18 @@ TOOL_NAMES = [
     "take_screenshot",
 ]
 
+# Phase 3 — memory tool names (only registered when memory_manager is provided)
+MEMORY_TOOL_NAMES = [
+    "read_memory",
+    "update_memory",
+    "save_workflow",
+]
+
 
 def create_all_tools(
     bridge: "BridgeClient",
     emitter: "EventEmitter | None" = None,
+    memory_manager: "MemoryManager | None" = None,
 ) -> list[SdkMcpTool]:
     """Create all agent tools with the bridge client and emitter captured in closures.
 
@@ -77,6 +91,8 @@ def create_all_tools(
         bridge: The WebSocket bridge client for accessibility API calls.
         emitter: Optional event emitter for Swift side-events. If None, a default
             EventEmitter is created so tools can still be instantiated.
+        memory_manager: Optional memory manager for memory tools. If None,
+            memory tools are not included (backward compatible).
 
     Returns a list of SdkMcpTool instances ready for create_sdk_mcp_server().
     """
@@ -85,7 +101,7 @@ def create_all_tools(
 
         emitter = EventEmitter()
 
-    return [
+    tools = [
         # Phase 1
         create_get_ui_tree(bridge),
         create_find_elements(bridge),
@@ -107,10 +123,23 @@ def create_all_tools(
         create_take_screenshot(),
     ]
 
+    # Phase 3 — memory tools (only if memory manager is provided)
+    if memory_manager is not None:
+        tools.extend(
+            [
+                create_read_memory(memory_manager),
+                create_update_memory(memory_manager),
+                create_save_workflow(memory_manager),
+            ]
+        )
+
+    return tools
+
 
 def create_mcp_server(
     bridge: "BridgeClient",
     emitter: "EventEmitter | None" = None,
+    memory_manager: "MemoryManager | None" = None,
 ) -> McpSdkServerConfig:
     """Create an in-process MCP server with all accessibility tools.
 
@@ -120,11 +149,12 @@ def create_mcp_server(
     Args:
         bridge: The WebSocket bridge client for communicating with the pyax bridge.
         emitter: Optional event emitter for Swift side-events.
+        memory_manager: Optional memory manager for memory tools.
 
     Returns:
         McpSdkServerConfig ready for ClaudeAgentOptions.mcp_servers.
     """
-    tools = create_all_tools(bridge, emitter)
+    tools = create_all_tools(bridge, emitter, memory_manager)
     return create_sdk_mcp_server(
         name="pyax-tools",
         version="0.1.0",

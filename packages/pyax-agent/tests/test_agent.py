@@ -17,10 +17,11 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
-from pyax_agent.agent import AgentLoop
+from pyax_agent.agent import AgentLoop, SYSTEM_PROMPT
 from pyax_agent.bridge_client import BridgeClient
 from pyax_agent.config import AgentConfig
 from pyax_agent.event_emitter import EventEmitter
+from pyax_agent.memory import MemoryManager
 from pyax_agent.models.sse import (
     ClearHighlightsEvent,
     DoneEvent,
@@ -464,3 +465,98 @@ class TestAgentEmitter:
 
         types = [type(e).__name__ for e in events]
         assert "ClearHighlightsEvent" in types
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Phase 3 tests — Memory integration in agent
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestAgentMemoryIntegration:
+    """Tests for memory manager integration in the agent loop."""
+
+    def test_agent_without_memory(self):
+        """Agent works without memory manager (backward compatible)."""
+        config = make_config()
+        bridge = BridgeClient()
+        agent = AgentLoop(config=config, bridge=bridge)
+        assert agent._memory_manager is None
+
+    def test_agent_with_explicit_memory_manager(self, tmp_path):
+        """Agent accepts explicit memory manager."""
+        config = make_config()
+        bridge = BridgeClient()
+        mm = MemoryManager(str(tmp_path))
+        mm.ensure_files()
+        agent = AgentLoop(config=config, bridge=bridge, memory_manager=mm)
+        assert agent._memory_manager is mm
+
+    def test_agent_creates_memory_from_config(self, tmp_path):
+        """Agent creates memory manager from config.memory_dir."""
+        config = make_config(memory_dir=str(tmp_path / "agent_mem"))
+        bridge = BridgeClient()
+        agent = AgentLoop(config=config, bridge=bridge)
+        assert agent._memory_manager is not None
+        assert (tmp_path / "agent_mem" / "SOUL.md").exists()
+
+    def test_agent_empty_memory_dir_no_manager(self):
+        """Empty memory_dir means no memory manager."""
+        config = make_config(memory_dir="")
+        bridge = BridgeClient()
+        agent = AgentLoop(config=config, bridge=bridge)
+        assert agent._memory_manager is None
+
+    def test_build_options_without_memory(self):
+        """Options use plain SYSTEM_PROMPT without memory."""
+        config = make_config()
+        bridge = BridgeClient()
+        agent = AgentLoop(config=config, bridge=bridge)
+        options = agent._build_options()
+        assert options.system_prompt == SYSTEM_PROMPT
+
+    def test_build_options_with_memory(self, tmp_path):
+        """Options use enriched system prompt with memory."""
+        config = make_config()
+        bridge = BridgeClient()
+        mm = MemoryManager(str(tmp_path))
+        mm.ensure_files()
+        agent = AgentLoop(config=config, bridge=bridge, memory_manager=mm)
+        options = agent._build_options()
+        assert options.system_prompt.startswith(SYSTEM_PROMPT)
+        assert "## Agent Identity" in options.system_prompt
+        assert "## User Profile" in options.system_prompt
+        assert "## Workspace Knowledge" in options.system_prompt
+
+    def test_build_options_memory_tools_allowed(self, tmp_path):
+        """Memory tool names should appear in allowed_tools when memory is enabled."""
+        config = make_config()
+        bridge = BridgeClient()
+        mm = MemoryManager(str(tmp_path))
+        mm.ensure_files()
+        agent = AgentLoop(config=config, bridge=bridge, memory_manager=mm)
+        options = agent._build_options()
+        allowed = options.allowed_tools
+        assert "mcp__pyax-tools__read_memory" in allowed
+        assert "mcp__pyax-tools__update_memory" in allowed
+        assert "mcp__pyax-tools__save_workflow" in allowed
+
+    def test_build_options_no_memory_tools_without_manager(self):
+        """Memory tool names should NOT appear in allowed_tools without memory."""
+        config = make_config()
+        bridge = BridgeClient()
+        agent = AgentLoop(config=config, bridge=bridge)
+        options = agent._build_options()
+        allowed = options.allowed_tools
+        assert "mcp__pyax-tools__read_memory" not in allowed
+        assert "mcp__pyax-tools__update_memory" not in allowed
+        assert "mcp__pyax-tools__save_workflow" not in allowed
+
+    def test_explicit_manager_overrides_config(self, tmp_path):
+        """Explicit memory_manager takes precedence over config.memory_dir."""
+        config = make_config(memory_dir=str(tmp_path / "from_config"))
+        bridge = BridgeClient()
+        mm = MemoryManager(str(tmp_path / "explicit"))
+        mm.ensure_files()
+        agent = AgentLoop(config=config, bridge=bridge, memory_manager=mm)
+        assert agent._memory_manager is mm
+        assert agent._memory_manager.memory_dir == tmp_path / "explicit"

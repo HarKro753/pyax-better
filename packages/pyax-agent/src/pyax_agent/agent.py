@@ -31,6 +31,7 @@ from claude_agent_sdk import (
 from pyax_agent.bridge_client import BridgeClient
 from pyax_agent.config import AgentConfig
 from pyax_agent.event_emitter import EventEmitter
+from pyax_agent.memory import MemoryManager
 from pyax_agent.models.sse import (
     DoneEvent,
     ErrorEvent,
@@ -40,7 +41,7 @@ from pyax_agent.models.sse import (
     ToolCallEvent,
     ToolResultEvent,
 )
-from pyax_agent.tools.registry import TOOL_NAMES, create_mcp_server
+from pyax_agent.tools.registry import MEMORY_TOOL_NAMES, TOOL_NAMES, create_mcp_server
 
 logger = logging.getLogger(__name__)
 
@@ -81,12 +82,20 @@ class AgentLoop:
         bridge: BridgeClient,
         query_fn: Any = None,
         emitter: EventEmitter | None = None,
+        memory_manager: MemoryManager | None = None,
     ) -> None:
         self.config = config
         self.bridge = bridge
         self._query_fn = query_fn or query
         self._emitter = emitter or EventEmitter()
-        self._mcp_server = create_mcp_server(bridge, self._emitter)
+
+        # Set up memory manager from config if not explicitly provided
+        if memory_manager is None and config.memory_dir:
+            memory_manager = MemoryManager(config.memory_dir)
+            memory_manager.ensure_files()
+        self._memory_manager = memory_manager
+
+        self._mcp_server = create_mcp_server(bridge, self._emitter, memory_manager)
         self._cancelled = False
 
     @property
@@ -100,9 +109,22 @@ class AgentLoop:
 
     def _build_options(self) -> ClaudeAgentOptions:
         """Build ClaudeAgentOptions from our config."""
+        # Build the tool name allowlist from registered tools
         allowed_tools = [f"mcp__pyax-tools__{name}" for name in TOOL_NAMES]
+
+        # If memory manager is available, add memory tool names to allowed list
+        if self._memory_manager is not None:
+            for name in MEMORY_TOOL_NAMES:
+                allowed_tools.append(f"mcp__pyax-tools__{name}")
+
+        # Build system prompt — enrich with memory files if available
+        if self._memory_manager is not None:
+            system_prompt = self._memory_manager.build_system_prompt(SYSTEM_PROMPT)
+        else:
+            system_prompt = SYSTEM_PROMPT
+
         return ClaudeAgentOptions(
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             model=self.config.model,
             max_turns=self.config.max_turns,
             permission_mode=self.config.permission_mode,
